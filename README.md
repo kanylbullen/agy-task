@@ -34,7 +34,11 @@ also comes as a [Claude Code plugin](#use-it-from-claude-code), so Claude can do
 run that used 129k tokens (other fields left out):
 
 ```json
-{"status": "SUCCESS", "response": "", "denied_actions": [{"action": "read_file", "display_name": "ReadFile"}]}
+{
+  "status": "SUCCESS",
+  "response": "",
+  "denied_actions": [{"action": "read_file", "display_name": "ReadFile"}]
+}
 ```
 
 A tool call was denied and the response is empty, yet the status says `SUCCESS`. agy-task exits 4
@@ -59,7 +63,8 @@ standard Linux tools.
 You need `agy` installed and signed in. Then:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kanylbullen/agy-task/main/bin/agy-task -o ~/.local/bin/agy-task
+curl -fsSL https://raw.githubusercontent.com/kanylbullen/agy-task/main/bin/agy-task \
+  -o ~/.local/bin/agy-task
 chmod +x ~/.local/bin/agy-task
 ```
 

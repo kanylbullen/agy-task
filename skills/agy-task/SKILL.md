@@ -62,7 +62,12 @@ ${CLAUDE_PLUGIN_ROOT}/bin/agy-task -r /abs/path/to/repo -b origin/main -w -a "np
 - A long prompt goes in a file with `-f FILE`, or on stdin.
 - Runs take from ten seconds to several minutes. Run anything longer than a quick read in the
   background and wait for it to finish rather than polling.
-- The default model is Hydrogen. `-m argon` for a job that failed on it or needs more judgement.
+- **Stay on the default model, Hydrogen.** Argon draws on a small weekly quota: one long write
+  task can take a fifth of it. Use `-m argon` only to retry a job that has already failed on
+  Hydrogen, never for a long write task and never as a second opinion.
+- **Respect the budget.** If agy-task refuses a run because a quota pot is over its weekly budget
+  (exit 2), do not pass `-B` on your own. Run it on the default model, do the work yourself, or
+  ask the user.
 
 ## Reading the result
 
@@ -71,7 +76,7 @@ ${CLAUDE_PLUGIN_ROOT}/bin/agy-task -r /abs/path/to/repo -b origin/main -w -a "np
 | Code | Meaning | What to do |
 |---|---|---|
 | 0 | done | check the receipt |
-| 2 | bad invocation or setup failure | fix the flags or the repo; the agent never ran |
+| 2 | bad invocation, setup failure, or a pot over its budget | fix the flags or the repo, or change model; the agent never ran |
 | 3 | agy error / no JSON | read `stderr` in the log directory |
 | 4 | denied, or `MISSING COMMAND` | the answer may be incomplete; rerun with the right `-a` |
 | 5 | empty answer | rerun or rephrase |

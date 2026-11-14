@@ -116,7 +116,7 @@ Exit code `0` is the only finished outcome:
 | Code | Meaning |
 |---|---|
 | 0 | done, nothing denied |
-| 2 | bad invocation or a setup failure (fetch, worktree, project); the agent never ran |
+| 2 | bad invocation, a setup failure (fetch, worktree, project) or a pot over its budget; the agent never ran |
 | 3 | agy error, or no JSON answer |
 | 4 | something was denied, or the agent reported a `MISSING COMMAND`; the answer may be incomplete |
 | 5 | empty answer despite `"status":"SUCCESS"` |
@@ -174,17 +174,38 @@ One set of measurements, with the same two tasks on three models. Yours will var
 
 That is why the default model is Hydrogen. It was as accurate as Argon on these tasks, about three
 times faster, and it stays off Argon's weekly limit. Use `-m argon` when a job has already failed
-on Hydrogen or needs more judgement.
+on Hydrogen.
 
 **agy-task reviewed itself.** Version 0.1.1 came out of two read tasks run on this repository.
 Hydrogen took 105 s and 55k tokens and reported 9 findings. Argon took 499 s and 80k tokens and
 reported 22. Fifteen findings held up when checked against the code, and all fifteen are fixed.
 
-**Quota pots.** The Models & Usage panel in Antigravity shows separate limits. On a Google AI Pro
-plan in November 2026 there were three: Gemini 4 Argon (weekly), Claude and GPT (weekly plus
-five-hour), and the other Gemini models, Hydrogen and Flash (weekly plus five-hour). Argon used
-roughly 2 % of its week per 100k tokens on that account, and Claude models drained their pot
-several times faster per token. agy-task records the pot of each run. Your plan may differ.
+### Keep the scarce model for the jobs that need it
+
+The Models & Usage panel in Antigravity shows separate quota pots, and they empty at very different
+speeds. On a Google AI Pro plan in November 2026 there were three: Gemini 4 Argon (weekly), Claude
+and GPT (weekly plus five-hour), and the other Gemini models, Hydrogen and Flash (weekly plus
+five-hour). Measured over one day on that account:
+
+- **Argon** used about 2.8 % of its week per 100k tokens. A single 42-minute write task (683k
+  tokens) took about a fifth of the week.
+- **Hydrogen and Flash** used about 0.25 % of their week per 100k tokens, roughly a tenth of that.
+
+The panel rounds to whole percent, so these are rough, and a larger plan will have other limits.
+
+Hydrogen is the default, so the bulk of the work already lands on the cheap pot. To keep it that
+way, whoever or whatever is calling, give the scarce pot a weekly budget:
+
+```sh
+mkdir -p ~/.config/agy-task
+echo 'AGY_TASK_BUDGET="argon=700k"' >> ~/.config/agy-task/config
+```
+
+Once agy-task has spent that many tokens from a pot in seven days, it refuses further runs on that
+pot with exit code 2, before anything is created. `-B` runs one anyway, and `agy-task -u 7` shows
+where each budget stands. On that AI Pro account, 700k tokens was about a fifth of Argon's week.
+With a larger plan, raise the number or leave the budget out. The budget counts agy-task's own
+runs, not other clients.
 
 ## Ten things `agy -p` will not tell you
 
@@ -249,6 +270,7 @@ agy-task [options] -p "<task>"      (or -f FILE, or the task on stdin)
   -c ID            continue a conversation; -k keep a read task's worktree
   -P PROJECT       Antigravity project; -L no remote control
   -u DAYS          usage per quota pot over the last DAYS days
+  -B               run although the model's pot is over its weekly budget
 ```
 
 `agy-task -h` has the rest.
@@ -258,11 +280,13 @@ agy-task [options] -p "<task>"      (or -f FILE, or the task on stdin)
 in. Tested on Linux (Debian) with agy 1.5.9. BusyBox systems such as Alpine lack `env -C`. macOS
 is untested; you will at least need `brew install flock coreutils`.
 
-**Environment.**
+**Settings.** From the environment, or as `KEY=VALUE` lines in `~/.config/agy-task/config`, so
+that every caller on the machine gets the same ones. The environment wins.
 
 | Variable | Default | |
 |---|---|---|
 | `AGY_TASK_MODEL` | `hydrogen` | model when `-m` is not given |
+| `AGY_TASK_BUDGET` | none | weekly tokens per quota pot, e.g. `argon=700k claude+gpt=300k` |
 | `AGY_TASK_WORKTREES` | `~/worktrees` | where worktrees go |
 | `AGY_TASK_HOME` | `$XDG_CACHE_HOME/agy-task`, else `~/.cache/agy-task` | logs, ledger, model list |
 | `AGY_TASK_DAEMON_UNIT` | `antigravity-cli-daemon` | systemd user unit of the remote-control daemon |
@@ -290,8 +314,10 @@ agent's attempts are denied. Add `-a "git commit"` if you want the agent to comm
 read. If something changes anyway, the receipt shows it, the exit code is 6 and the worktree is
 kept for you to inspect.
 
-**Which model should I use?** Start with the default, Hydrogen. Switch with `-m`, using a short
-name such as `argon` or `flash-high`, or any id from `agy models`.
+**Which model should I use?** Hydrogen, the default, for nearly everything. Switch with `-m`,
+using a short name such as `argon` or `flash-high`, or any id from `agy models`. Argon is for a
+job that has already failed on Hydrogen. Its quota is small, so
+[give it a budget](#keep-the-scarce-model-for-the-jobs-that-need-it).
 
 **Does it work on macOS?** Untested. The script relies on `flock` and GNU `timeout`, which need
 Homebrew there. Reports are welcome.

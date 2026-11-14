@@ -21,13 +21,29 @@
 # README.md has the full list of traps: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.1.1
+VERSION=0.2.0
 
-# Settings, each overridable from the environment.
+# Settings. The environment wins, then an optional config file of KEY=VALUE
+# lines, then the defaults. The file exists so that every caller on the machine
+# gets the same settings, a budget above all. It is parsed, never sourced: only
+# the keys named here are read.
+CONFIG=${AGY_TASK_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/agy-task/config}
+if [ -r "$CONFIG" ]; then
+  while IFS='=' read -r k v; do
+    case $k in
+      AGY_TASK_MODEL | AGY_TASK_WORKTREES | AGY_TASK_HOME | AGY_TASK_DAEMON_UNIT | AGY_TASK_BUDGET)
+        v=${v%"${v##*[![:space:]]}"}
+        v=${v%\"} v=${v#\"} v=${v%\'} v=${v#\'}
+        [ -n "${!k+set}" ] || printf -v "$k" '%s' "${v/#\~\//$HOME/}" ;;
+    esac
+  done < <(grep -E '^AGY_TASK_[A-Z_]+=' "$CONFIG")
+fi
 MODEL_DEFAULT=${AGY_TASK_MODEL:-hydrogen}
 WT_ROOT=${AGY_TASK_WORKTREES:-$HOME/worktrees}
 LOG_ROOT=${AGY_TASK_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/agy-task}
 DAEMON_UNIT=${AGY_TASK_DAEMON_UNIT:-antigravity-cli-daemon}
+# Weekly token budgets per quota pot, e.g. "argon=700k claude+gpt=300k". None by default.
+BUDGET=${AGY_TASK_BUDGET:-}
 DEFAULT_ALLOW=("pwd" "git status" "git log" "git diff" "git show" "ls" "wc" "rg")
 LEDGER=$LOG_ROOT/ledger.tsv
 MODELS_CACHE=$LOG_ROOT/.models
@@ -36,7 +52,7 @@ MODELS_CACHE=$LOG_ROOT/.models
 # Observed on a Google AI Pro plan in November 2026: Argon has a weekly limit of
 # its own, Claude and GPT share a weekly and a five-hour limit, and the other
 # Gemini models (Hydrogen, Flash) share a third pot, also weekly plus five-hour.
-# Display and ledger only; nothing is decided on it. Other plans may differ.
+# Used for the ledger and for AGY_TASK_BUDGET. Other plans may differ.
 pot_of() {
   case $1 in
     gemini-4-argon-* | gemini-pro-orchestrator-*) echo argon ;;
@@ -47,6 +63,41 @@ pot_of() {
 }
 
 die() { echo "agy-task: $*" >&2; exit 2; }
+
+# "700k", "1.5M" or a plain number, as a whole number of tokens. Fails on anything else.
+to_tokens() {
+  [[ $1 =~ ^([0-9]+(\.[0-9]+)?)([kKmM]?)$ ]] || return 1
+  awk -v n="${BASH_REMATCH[1]}" -v u="${BASH_REMATCH[3]}" \
+    'BEGIN { m = (u ~ /[kK]/) ? 1e3 : (u ~ /[mM]/) ? 1e6 : 1; printf "%d\n", n * m }'
+}
+
+human() { awk -v x="$1" 'BEGIN { if (x >= 1e6) printf "%.1fM", x / 1e6; else printf "%dk", x / 1000 + 0.5 }'; }
+
+# A budget that cannot be read must not pass for no budget at all.
+validate_budget() {
+  local pairs pair
+  read -ra pairs <<<"${BUDGET//,/ }"
+  for pair in ${pairs[@]+"${pairs[@]}"}; do
+    [[ $pair == ?*=?* ]] && to_tokens "${pair#*=}" >/dev/null ||
+      die "AGY_TASK_BUDGET: \"$pair\" should look like argon=700k"
+  done
+}
+
+# The weekly token budget of a pot. Prints nothing when it has none.
+budget_for() {
+  local pairs pair
+  read -ra pairs <<<"${BUDGET//,/ }"
+  for pair in ${pairs[@]+"${pairs[@]}"}; do
+    [ "${pair%%=*}" = "$1" ] && { to_tokens "${pair#*=}"; return; }
+  done
+}
+
+# Tokens agy-task has spent from a pot over the last seven days, from the ledger.
+pot_used() {
+  [ -s "$LEDGER" ] || { echo 0; return; }
+  awk -F'\t' -v since="$(($(date +%s) - 7 * 86400))" -v pot="$1" \
+    'NR > 1 && $2 >= since && $5 == pot { t += $13 } END { printf "%d\n", t }' "$LEDGER"
+}
 
 # The main checkout of the repository DIR belongs to, also when DIR is a linked
 # worktree or a subdirectory. (`rev-parse --path-format` would do it in one step,
@@ -125,6 +176,14 @@ usage_report() {
       printf "%-11s %-26s %6d %9s %9s %6dm\n", a[1], a[2], n[k], h(tot[k]), h(cache[k]), sec[k] / 60 + 0.5 } }
   ' "$LEDGER" | sort
   echo "Antigravity's own panel counts every client, not just these runs, and its week starts at your first use."
+  validate_budget
+  local pairs pair pot budget used
+  read -ra pairs <<<"${BUDGET//,/ }"
+  for pair in ${pairs[@]+"${pairs[@]}"}; do
+    pot=${pair%%=*} budget=$(to_tokens "${pair#*=}") used=$(pot_used "$pot")
+    printf 'Budget: %s has used %s of %s tokens in the last 7 days%s\n' "$pot" "$(human "$used")" "$(human "$budget")" \
+      "$([ "$used" -ge "$budget" ] && echo ' — over budget, so runs on it are refused without -B')"
+  done
 }
 
 usage() {
@@ -149,6 +208,9 @@ Model:
   -m MODEL         a short name (argon, hydrogen, flash, opus, sonnet, ... with -low/-medium/-high/-xhigh
                    after it, -medium by default) or a full id from `agy models`.
                    Default: $AGY_TASK_MODEL, else hydrogen.
+  -B               run even though the model's quota pot is over its weekly budget. A budget is set
+                   with AGY_TASK_BUDGET, e.g. "argon=700k": once agy-task has spent that many tokens
+                   from the pot in seven days, further runs on it are refused. No budget by default.
   -u DAYS          print usage per quota pot and model over the last DAYS days, and exit
 
 Other:
@@ -170,21 +232,24 @@ Exit codes: 0 ok · 2 bad invocation or setup failure, the agent never ran · 3 
             4 something was denied or missing · 5 empty answer · 6 a read task changed files
             7 wrong working directory · 124 time limit
 
-Environment: AGY_TASK_MODEL, AGY_TASK_WORKTREES (default ~/worktrees),
-             AGY_TASK_HOME (default ${XDG_CACHE_HOME:-~/.cache}/agy-task),
-             AGY_TASK_DAEMON_UNIT (default antigravity-cli-daemon)
+Settings: AGY_TASK_MODEL, AGY_TASK_BUDGET, AGY_TASK_WORKTREES (default ~/worktrees),
+          AGY_TASK_HOME (default ${XDG_CACHE_HOME:-~/.cache}/agy-task),
+          AGY_TASK_DAEMON_UNIT (default antigravity-cli-daemon).
+          From the environment, or as KEY=VALUE lines in ${XDG_CONFIG_HOME:-~/.config}/agy-task/config
+          (the environment wins), so that every caller on the machine gets the same settings.
 
 Clean up a write task:  git -C REPO worktree remove ~/worktrees/agy-NAME && git -C REPO branch -D agy/NAME
 EOF
 }
 
 dir="" repo="" base="" write=0 model="" name="" tmo=30m schema="" conv="" keep=0
-prompt="" prompt_file="" project="" live=1
+prompt="" prompt_file="" project="" live=1 over_budget=0
 allow=("${DEFAULT_ALLOW[@]}")
 
-while getopts ":C:r:b:wa:m:n:t:s:c:kp:f:P:Lu:Vh" opt; do
+while getopts ":C:r:b:wa:m:n:t:s:c:kp:f:P:LBu:Vh" opt; do
   case $opt in
     u) usage_report "$OPTARG"; exit 0 ;;
+    B) over_budget=1 ;;
     V) echo "agy-task $VERSION"; exit 0 ;;
     P) project=$OPTARG ;;
     L) live=0 ;;
@@ -253,6 +318,22 @@ mkdir -p "$LOG_ROOT" || die "cannot create $LOG_ROOT"
 # agy rejects an unknown id loudly, but only after the worktree has been made.
 model=$(resolve_model "${model:-$MODEL_DEFAULT}") || exit 2
 pot=$(pot_of "$model")
+
+# --- the budget -----------------------------------------------------------------
+# A scarce pot empties fast: one long write task on Argon took about a fifth of
+# a Google AI Pro week. A weekly budget keeps such a model for the jobs that need
+# it. Over budget, the run is refused here, before anything has been created.
+validate_budget
+budget=$(budget_for "$pot") budget_note=""
+if [ -n "$budget" ]; then
+  used=$(pot_used "$pot")
+  budget_note=", $(human "$used") of $(human "$budget") this week"
+  if [ "$used" -ge "$budget" ] && [ $over_budget = 1 ]; then
+    echo "agy-task: warning: the $pot pot is over its weekly budget ($(human "$used") of $(human "$budget") tokens); running anyway because of -B" >&2
+  elif [ "$used" -ge "$budget" ]; then
+    die "the $pot pot is over its weekly budget: agy-task has used $(human "$used") of $(human "$budget") tokens from it in the last 7 days. Pick a model on another pot (the default is $MODEL_DEFAULT), raise AGY_TASK_BUDGET, or pass -B to run this one anyway"
+  fi
+fi
 
 # --- where it runs --------------------------------------------------------------
 run_id="$(date +%Y%m%d-%H%M%S)-$name"
@@ -414,7 +495,7 @@ args=(-p "$full" --output-format json --model "$model" --print-timeout "${secs}s
 [ -n "$conv" ] && args+=(--conversation "$conv")
 
 # --- run --------------------------------------------------------------------------
-echo "agy-task: $name · $model (pot $pot) · $([ $write = 1 ] && echo write || echo read) · project $project$([ $live = 1 ] && echo ' · live on antigravity.google.com') · $dir" >&2
+echo "agy-task: $name · $model (pot $pot$budget_note) · $([ $write = 1 ] && echo write || echo read) · project $project$([ $live = 1 ] && echo ' · live on antigravity.google.com') · $dir" >&2
 (cd "$dir" && timeout -k 30 $((secs + 120)) agy "${args[@]}") \
   >"$logdir/stdout" 2>"$logdir/stderr" </dev/null
 rc=$?

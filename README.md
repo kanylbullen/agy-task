@@ -203,9 +203,13 @@ echo 'AGY_TASK_BUDGET="argon=700k"' >> ~/.config/agy-task/config
 
 Once agy-task has spent that many tokens from a pot in seven days, it refuses further runs on that
 pot with exit code 2, before anything is created. `-B` runs one anyway, and `agy-task -u 7` shows
-where each budget stands. On that AI Pro account, 700k tokens was about a fifth of Argon's week.
-With a larger plan, raise the number or leave the budget out. The budget counts agy-task's own
-runs, not other clients.
+where each budget stands.
+
+**Sizing it.** The budget is the share of the pot you let agy-task spend, not the size of the pot.
+Set it to the whole pot and agy-task never refuses anything before Antigravity does. On that AI Pro
+account the whole Argon week came to roughly 3.6M tokens, so 700k is about a fifth of it and 1.4M
+about two fifths. On a larger plan, scale the number with your limit. The budget counts agy-task's
+own runs, not other clients.
 
 ## Ten things `agy -p` will not tell you
 

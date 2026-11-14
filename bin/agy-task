@@ -21,7 +21,7 @@
 # README.md has the full list of traps: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.1.0
+VERSION=0.1.1
 
 # Settings, each overridable from the environment.
 MODEL_DEFAULT=${AGY_TASK_MODEL:-hydrogen}
@@ -48,6 +48,29 @@ pot_of() {
 
 die() { echo "agy-task: $*" >&2; exit 2; }
 
+# The main checkout of the repository DIR belongs to, also when DIR is a linked
+# worktree or a subdirectory. (`rev-parse --path-format` would do it in one step,
+# but needs git 2.31.)
+main_root() {
+  local common
+  common=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 1
+  (cd -- "$1" && cd -- "$common/.." && pwd -P)
+}
+
+# A hash of the whole working tree, untracked files included and ignored ones
+# not, taken through a scratch copy of the index so the real one is never
+# touched. Comparing `git status` output instead misses a second edit to a file
+# that was already modified, and any change inside an already-untracked file.
+# Prints nothing when it cannot tell; the caller treats that as a change.
+tree_state() (
+  cd -- "$1" || exit 1
+  idx=$(git rev-parse --git-path index) || exit 1
+  tmp=$(mktemp "${TMPDIR:-/tmp}/agy-task-index.XXXXXX") || exit 1
+  trap 'rm -f -- "$tmp"' EXIT
+  cp -- "$idx" "$tmp" 2>/dev/null || rm -f -- "$tmp"
+  GIT_INDEX_FILE=$tmp git add -A >/dev/null 2>&1 && GIT_INDEX_FILE=$tmp git write-tree
+)
+
 # Refresh the cached `agy models` list (id<TAB>label) when it is missing, older
 # than a day, or when called with "force".
 refresh_models() {
@@ -63,7 +86,7 @@ refresh_models() {
 # Prints the id, or nothing when there is no single match.
 match_model() {
   local m=$1 fam=$1 eff=medium hits
-  cut -f1 "$MODELS_CACHE" 2>/dev/null | grep -qx -- "$m" && { echo "$m"; return; }
+  cut -f1 "$MODELS_CACHE" 2>/dev/null | grep -Fqx -- "$m" && { echo "$m"; return; }
   case $m in *-low | *-medium | *-high | *-xhigh) fam=${m%-*} eff=${m##*-} ;; esac
   [[ $fam =~ ^[a-z0-9.-]+$ ]] || return
   hits=$(cut -f1 "$MODELS_CACHE" 2>/dev/null | grep -E -- "(^|-)${fam//./\\.}(-.*)?-${eff}\$")
@@ -90,7 +113,7 @@ usage_report() {
   local days=$1 since
   [[ $days =~ ^[0-9]+$ ]] || die "-u takes a number of days, e.g. -u 7"
   [ -s "$LEDGER" ] || { echo "no usage logged yet ($LEDGER does not exist)"; return; }
-  since=$(($(date +%s) - days * 86400))
+  since=$(($(date +%s) - 10#$days * 86400))
   echo "Usage over the last $days days (agy-task runs only, from $LEDGER):"
   printf '%-11s %-26s %6s %9s %9s %7s\n' pot model runs tokens cache time
   # Columns: 1 time, 2 epoch, 3 run, 4 model, 5 pot, 6 mode, 7 project, 8 sec,
@@ -142,12 +165,14 @@ Antigravity remote control (https://antigravity.google.com):
   -L               no remote control for this run (otherwise it can be followed live while it runs)
 
 Output: the answer and the git receipt on stdout; the full JSON and the prompt in
-$AGY_TASK_HOME/<run>/ (default ~/.cache/agy-task).
-Exit codes: 0 ok · 2 bad invocation · 3 agy error or no JSON · 4 something was denied or missing
-            5 empty answer · 6 a read task changed files · 7 wrong working directory · 124 time limit
+$AGY_TASK_HOME/<run>/ (default ${XDG_CACHE_HOME:-~/.cache}/agy-task).
+Exit codes: 0 ok · 2 bad invocation or setup failure, the agent never ran · 3 agy error or no JSON
+            4 something was denied or missing · 5 empty answer · 6 a read task changed files
+            7 wrong working directory · 124 time limit
 
 Environment: AGY_TASK_MODEL, AGY_TASK_WORKTREES (default ~/worktrees),
-             AGY_TASK_HOME (default ~/.cache/agy-task), AGY_TASK_DAEMON_UNIT (default antigravity-cli-daemon)
+             AGY_TASK_HOME (default ${XDG_CACHE_HOME:-~/.cache}/agy-task),
+             AGY_TASK_DAEMON_UNIT (default antigravity-cli-daemon)
 
 Clean up a write task:  git -C REPO worktree remove ~/worktrees/agy-NAME && git -C REPO branch -D agy/NAME
 EOF
@@ -168,9 +193,11 @@ while getopts ":C:r:b:wa:m:n:t:s:c:kp:f:P:Lu:Vh" opt; do
     b) base=$OPTARG ;;
     w) write=1 ;;
     a) case $OPTARG in
-         *'&&'* | *';'* | *'|'* | *'>'* | *'<'* | *'`'* | *'$('*)
+         *'&'* | *';'* | *'|'* | *'>'* | *'<'* | *'`'* | *'$('* | *$'\n'*)
            die "-a \"$OPTARG\": agy always denies commands with shell operators when headless. Use e.g. \"env -C DIR COMMAND\" instead of \"cd DIR && COMMAND\"" ;;
        esac
+       # An empty prefix is a prefix of every command.
+       [ -n "${OPTARG//[[:space:]]/}" ] || die "-a needs a command prefix; an empty one would allow every command"
        allow+=("$OPTARG") ;;
     m) model=$OPTARG ;;
     n) name=$OPTARG ;;
@@ -199,9 +226,16 @@ fi
 [ -z "$repo" ] && [ -z "$dir" ] && die "say where: -r REPO -b REF (worktree) or -C DIR"
 [ -n "$repo" ] && [ -z "$base" ] && die "-r needs -b, e.g. -b origin/main — without it the agent gets whatever the checkout happens to be on"
 [ -z "$repo" ] && [ -n "$base" ] && die "-b goes with -r"
+[[ $base == -* ]] && die "-b should be a ref such as origin/main, not \"$base\""
 
-name=${name:-$(date +%m%d-%H%M%S)}
-[[ $name =~ ^[A-Za-z0-9._-]+$ ]] || die "-n may only contain A-Z a-z 0-9 . _ -"
+# The process id keeps two unnamed runs started in the same second apart.
+name=${name:-$(date +%m%d-%H%M%S)-$$}
+[[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "-n must start with a letter or digit and contain only A-Z a-z 0-9 . _ -"
+
+# agy runs inside the worktree, so a relative schema file would be looked for there.
+if [ -n "$schema" ] && [ -f "$schema" ]; then
+  schema=$(cd -- "$(dirname -- "$schema")" && pwd -P)/$(basename -- "$schema")
+fi
 
 [[ $tmo =~ ^([0-9]+)([smh]?)$ ]] || die "-t should be e.g. 20m, 1h or 300s"
 case ${BASH_REMATCH[2]} in
@@ -220,51 +254,35 @@ mkdir -p "$LOG_ROOT" || die "cannot create $LOG_ROOT"
 model=$(resolve_model "${model:-$MODEL_DEFAULT}") || exit 2
 pot=$(pot_of "$model")
 
-# --- the workplace --------------------------------------------------------------
+# --- where it runs --------------------------------------------------------------
 run_id="$(date +%Y%m%d-%H%M%S)-$name"
 logdir=$LOG_ROOT/$run_id
-mkdir -p "$logdir" || die "cannot create $logdir"
+mkdir "$logdir" 2>/dev/null || die "cannot create $logdir (does a run by that name already exist? pick another -n)"
 
 is_git=0 wt=0 base_sha="" before="" branch=""
 if [ -n "$repo" ]; then
   repo=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die "$repo is not a git repository"
-  # Two jobs against one repo at the same moment fetched together, and one died
-  # with "cannot lock ref". The lock queues them; it is released once the
-  # worktree exists, or when the script exits.
-  exec 8>"$LOG_ROOT/.git-$(printf %s "$repo" | cksum | cut -d' ' -f1).lock"
-  flock 8
-  git_remote=${base%%/*}
-  if [ "$git_remote" != "$base" ] && git -C "$repo" remote | grep -qx -- "$git_remote"; then
-    # The lock only covers agy-task; another fetch in the same repo can still collide.
-    git -C "$repo" fetch -q -- "$git_remote" || { sleep 5; git -C "$repo" fetch -q -- "$git_remote"; } ||
-      die "git fetch $git_remote failed"
-  else
-    echo "agy-task: warning: $base is not a remote ref and is not fetched — a local branch can lag behind" >&2
-  fi
-  base_sha=$(git -C "$repo" rev-parse --verify -q "$base^{commit}") || die "cannot find $base in $repo"
-  mkdir -p "$WT_ROOT" || die "cannot create $WT_ROOT"
+  proj_root=$(main_root "$repo") || die "cannot find the main checkout of $repo"
   dir=$WT_ROOT/agy-$name
   [ -e "$dir" ] && die "$dir already exists — pick another -n"
-  if [ $write = 1 ]; then
-    branch=agy/$name
-    git -C "$repo" show-ref -q --verify "refs/heads/$branch" && die "branch $branch already exists — pick another -n"
-    git -C "$repo" worktree add -q -b "$branch" "$dir" "$base_sha" || die "git worktree add failed"
-  else
-    git -C "$repo" worktree add -q --detach "$dir" "$base_sha" || die "git worktree add failed"
-  fi
-  is_git=1 wt=1
-  exec 8>&- # release the lock, and do not let agy inherit it for the whole run
+  [ $write = 1 ] && git -C "$repo" show-ref -q --verify "refs/heads/agy/$name" &&
+    die "branch agy/$name already exists — pick another -n"
 else
   [ -d "$dir" ] || die "$dir does not exist"
-  dir=$(cd "$dir" && pwd -P)
-  if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  dir=$(cd -P -- "$dir" 2>/dev/null && pwd -P) && [ -n "$dir" ] || die "cannot enter the directory given with -C"
+  # Exit status alone is not enough: inside .git, rev-parse prints "false" and succeeds.
+  if [ "$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then
     is_git=1
-    base_sha=$(git -C "$dir" rev-parse -q --verify HEAD 2>/dev/null || true)
-    before=$(git -C "$dir" status --porcelain)
+    proj_root=$(main_root "$dir") || proj_root=$dir
+  else
+    proj_root=$dir
   fi
 fi
 
 # --- the Antigravity project ----------------------------------------------------
+# Settled before any worktree exists, so a project that cannot be used leaves
+# nothing behind to clean up.
+#
 # A --project name that does not exist falls back SILENTLY to "CLI Project", and
 # --new-project names the project after the directory and ignores --project. So
 # the script finds the project by name, or writes the file itself in agy's own
@@ -275,14 +293,6 @@ fi
 # directory to be that checkout rather than the worktree: the project's folder
 # goes first in the conversation's working directories, and run_command has no
 # cwd of its own. The project is a label for the remote page, not a workplace.
-if [ -n "$repo" ]; then
-  proj_root=$repo
-elif [ $is_git = 1 ]; then
-  # The main repo even when DIR is a worktree: git-common-dir points there.
-  proj_root=$(dirname "$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir)")
-else
-  proj_root=$dir
-fi
 if [ -z "$project" ]; then
   if [ -n "$repo" ] || [ $is_git = 1 ]; then project=$(basename "$proj_root"); else project=agy-task; fi
 fi
@@ -291,7 +301,7 @@ mkdir -p "$proj_dir"
 project_id=$(
   exec 9>"$LOG_ROOT/.projects.lock"
   flock 9
-  id=$(jq -r --arg n "$project" 'select(.name == $n) | .id' "$proj_dir"/*.json 2>/dev/null | head -n 1)
+  id=$(jq -r --arg n "$project" 'select(.name == $n) | .id // empty' "$proj_dir"/*.json 2>/dev/null | head -n 1)
   if [ -z "$id" ]; then
     id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
     [ -n "$id" ] || exit 1
@@ -304,7 +314,11 @@ project_id=$(
   fi
   echo "$id"
 ) || die "could not find or create the project \"$project\""
-[ -n "$project_id" ] || die "the project \"$project\" has no id"
+# A project with folders (made in agy's /projects, say) makes the working
+# directory ambiguous. Refuse rather than let the agent guess.
+if jq -e '(.projectResources.resources // []) | length > 0' "$proj_dir/$project_id.json" >/dev/null 2>&1; then
+  die "the project \"$project\" points at folders ($(jq -r '[.projectResources.resources[].folderUri] | join(", ")' "$proj_dir/$project_id.json")) — empty projectResources in $proj_dir/$project_id.json"
+fi
 # **The remote-control daemon reads the projects when it starts, and only then.**
 # A project created after that shows on the remote page, but its conversations
 # land under "CLI Project" until the daemon restarts. A restart cuts off runs
@@ -313,7 +327,9 @@ project_id=$(
 # terminal, not through the daemon.
 if [ -e "$logdir/.project-created" ] && command -v systemctl >/dev/null &&
   systemctl --user is-active -q "$DAEMON_UNIT" 2>/dev/null; then
-  if pgrep -u "$(id -u)" -f -- '^([^ ]*/)?agy (-p|--print) ' >/dev/null; then
+  if ! command -v pgrep >/dev/null; then
+    echo "agy-task: the remote page shows \"$project\"'s runs only after: systemctl --user restart $DAEMON_UNIT (not done: without pgrep, other runs cannot be checked for)" >&2
+  elif pgrep -u "$(id -u)" -f -- '^([^ ]*/)?agy (-p|--print) ' >/dev/null; then
     echo "agy-task: the remote page shows \"$project\"'s runs only after: systemctl --user restart $DAEMON_UNIT (not done now: another agy run is going)" >&2
   elif systemctl --user restart "$DAEMON_UNIT"; then
     echo "agy-task: restarted the remote-control daemon, so \"$project\" gets its runs on the remote page" >&2
@@ -322,11 +338,39 @@ if [ -e "$logdir/.project-created" ] && command -v systemctl >/dev/null &&
     echo "agy-task: warning: could not restart $DAEMON_UNIT; \"$project\"'s runs land under CLI Project until it restarts" >&2
   fi
 fi
-# A project with folders (made in agy's /projects, say) makes the working
-# directory ambiguous. Refuse rather than let the agent guess.
-if jq -e '(.projectResources.resources // []) | length > 0' "$proj_dir/$project_id.json" >/dev/null 2>&1; then
-  die "the project \"$project\" points at folders ($(jq -r '[.projectResources.resources[].folderUri] | join(", ")' "$proj_dir/$project_id.json")) — empty projectResources in $proj_dir/$project_id.json"
+
+# --- the worktree ---------------------------------------------------------------
+if [ -n "$repo" ]; then
+  # Two jobs against one repo at the same moment fetched together, and one died
+  # with "cannot lock ref". The lock queues them, keyed on the main checkout so
+  # that its worktrees share it; it is released once the worktree exists.
+  exec 8>"$LOG_ROOT/.git-$(printf %s "$proj_root" | cksum | cut -d' ' -f1).lock"
+  flock 8
+  git_remote=${base%%/*}
+  if [ "$git_remote" != "$base" ] && git -C "$repo" remote | grep -Fqx -- "$git_remote"; then
+    # The lock only covers agy-task; another fetch in the same repo can still collide.
+    git -C "$repo" fetch -q -- "$git_remote" || { sleep 5; git -C "$repo" fetch -q -- "$git_remote"; } ||
+      die "git fetch $git_remote failed"
+  else
+    echo "agy-task: warning: $base is not a remote ref and is not fetched — a local branch can lag behind" >&2
+  fi
+  base_sha=$(git -C "$repo" rev-parse --verify -q "$base^{commit}") || die "cannot find $base in $repo"
+  mkdir -p "$WT_ROOT" || die "cannot create $WT_ROOT"
+  if [ $write = 1 ]; then
+    branch=agy/$name
+    git -C "$repo" worktree add -q -b "$branch" "$dir" "$base_sha" || die "git worktree add failed"
+  else
+    git -C "$repo" worktree add -q --detach "$dir" "$base_sha" || die "git worktree add failed"
+  fi
+  exec 8>&- # release the lock, and do not let agy inherit it for the whole run
+  # The physical path: it is what `pwd` prints inside, and the agent is told to
+  # compare the two. A symlinked worktree root would otherwise fail every run.
+  dir=$(cd -P -- "$dir" && pwd -P) || die "cannot enter $WT_ROOT/agy-$name"
+  is_git=1 wt=1
+elif [ $is_git = 1 ]; then
+  base_sha=$(git -C "$dir" rev-parse -q --verify HEAD 2>/dev/null || true)
 fi
+[ $is_git = 1 ] && before=$(tree_state "$dir")
 
 # --- permissions and prompt -----------------------------------------------------
 settings=$(jq -cn --argjson w "$write" '
@@ -350,12 +394,14 @@ pre+=$'\n'"Run \`pwd\` as your very first shell command. If it prints anything o
 pre+=$'\n'"Shell commands you may run start with: $allowed_list. Anything else is denied automatically."
 pre+=$'\n'"A command containing &&, ;, |, < or > is always denied, even when it starts correctly. Run one command at a time, and use \`env -C DIR COMMAND\` when something has to run in another directory."
 pre+=$'\n'"If you need a command that is not allowed: do not run it, do not work around it, and do not make up what it would have printed. Write a line of its own starting with 'MISSING COMMAND:' followed by the command instead, and carry on with what you can do."
-if [ $write = 1 ]; then
-  case " ${allow[*]} " in
-    *"git commit"*) ;;
-    *) pre+=$'\n'"Do not commit; the changes are reviewed and committed afterwards." ;;
-  esac
-fi
+# Commits are allowed when some -a prefix covers `git commit`: "git", "git commit",
+# or a longer one such as "git commit -m".
+may_commit=0
+for p in "${allow[@]}"; do
+  [[ "git commit" == "$p"* || "$p" == "git commit "* ]] && may_commit=1
+done
+[ $write = 1 ] && [ $may_commit = 0 ] &&
+  pre+=$'\n'"Do not commit; the changes are reviewed and committed afterwards."
 pre+=$'\n'"Finish with: what you did, what you could not do, and why."
 full=$pre$'\n\n'$prompt
 printf '%s\n' "$full" >"$logdir/prompt.txt"
@@ -381,8 +427,9 @@ status=$(field '.status // ""')
 response=$(field '.response // ""')
 denied=$(field '(.denied_actions // []) | map(.display_name + " (" + .action + ")") | join(", ")')
 conv_id=$(field '.conversation_id // ""')
-dur=$(field '(.duration_seconds // 0) | floor')
-tokens=$(field '.usage.total_tokens // "?"')
+agy_error=$(field '.error // ""')
+dur=$(field '(.duration_seconds // 0) | floor'); dur=${dur:-0}
+tokens=$(field '.usage.total_tokens // "?"'); tokens=${tokens:-?}
 # The agent is told to write "MISSING COMMAND: …" instead of guessing output.
 # Without that line, a model worked out an answer and called it the command's output.
 missing=$(grep -oE '^[*_ ]*MISSING COMMAND:.*' <<<"$response" | sed -E 's/^[*_ ]*MISSING COMMAND:[*_ ]*//' | paste -sd ',' - | sed 's/,/, /g')
@@ -395,17 +442,23 @@ wrong_cwd=$(grep -oE '^[*_ ]*WRONG WORKING DIRECTORY:.*' <<<"$response" | head -
 changed=0 receipt=""
 if [ $is_git = 1 ]; then
   head_now=$(git -C "$dir" rev-parse -q --verify HEAD 2>/dev/null || true)
-  st_now=$(git -C "$dir" status --porcelain)
-  if [ -n "$base_sha" ] && [ "$head_now" != "$base_sha" ]; then
+  after=$(tree_state "$dir")
+  if [ "$head_now" != "$base_sha" ]; then
     changed=1
-    receipt+="commits since ${base_sha:0:10}:"$'\n'"$(git -C "$dir" log --oneline "$base_sha..HEAD")"$'\n'
+    if [ -n "$base_sha" ]; then
+      receipt+="commits since ${base_sha:0:10}:"$'\n'"$(git -C "$dir" log --oneline "$base_sha..HEAD")"$'\n'
+    else
+      receipt+="commits (the repository had none before):"$'\n'"$(git -C "$dir" log --oneline)"$'\n'
+    fi
   fi
-  if [ "$st_now" != "$before" ]; then
+  if [ -z "$before" ] || [ -z "$after" ]; then
+    # Unknown is not "unchanged": a read task's worktree is then kept, not removed.
     changed=1
-    receipt+="working tree:"$'\n'"$st_now"$'\n'
-  fi
-  if [ $changed = 1 ] && [ -n "$base_sha" ]; then
-    receipt+="$(git -C "$dir" diff --stat "$base_sha")"$'\n'
+    receipt+="could not read the working tree's state, so it counts as changed — check $dir by hand"$'\n'
+  elif [ "$after" != "$before" ]; then
+    changed=1
+    # Tree to tree: only what changed during the run, not edits that were there before it.
+    receipt+="files changed during the run:"$'\n'"$(git -C "$dir" diff --stat "$before" "$after")"$'\n'
   fi
   [ $changed = 0 ] && receipt="no changes"$'\n'
 else
@@ -428,9 +481,12 @@ fi
 
 # --- the outcome -----------------------------------------------------------------
 code=0 why=""
-if [ $rc = 124 ] || [ $rc = 137 ]; then code=124 why="hit the time limit of $tmo"
+# agy's own --print-timeout fires first and answers status ERROR with
+# "print timeout after …"; the outer `timeout` is only the backstop.
+if [ $rc = 124 ] || [ $rc = 137 ] || [[ $agy_error == *"print timeout"* ]]; then
+  code=124 why="hit the time limit of $tmo (any answer is partial)"
 elif [ -z "$json" ]; then code=3 why="no JSON answer from agy (exit $rc, see stderr)"
-elif [ "$status" != SUCCESS ]; then code=3 why="agy answered status=$status"
+elif [ "$status" != SUCCESS ]; then code=3 why="agy answered status=$status${agy_error:+: $agy_error}"
 elif [ -n "$wrong_cwd" ]; then code=7 why="the agent ran in $wrong_cwd, not in $dir — start a new conversation (without -c) and check $wrong_cwd"
 elif [ $write = 0 ] && [ $changed = 1 ]; then code=6 why="the read task changed files in $dir"
 elif [ -n "$denied" ]; then code=4 why="denied: $denied — the answer may be incomplete"

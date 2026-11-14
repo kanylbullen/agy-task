@@ -42,8 +42,10 @@ Not affiliated with or endorsed by Google.
 
 ## Install
 
-Needs `bash`, `git`, `jq`, `flock`, `timeout` (coreutils) and `agy`, signed in. Tested on Linux
-(Debian) with agy 1.5.9. macOS is untested; you will at least need `brew install flock coreutils`.
+Needs `bash`, git 2.17 or later, `jq`, `flock`, GNU coreutils 8.28 or later (for `timeout -k`, and
+for the `env -C` the agent is told to use), `pgrep` (procps) and `agy`, signed in. Tested on Linux
+(Debian) with agy 1.5.9. BusyBox systems such as Alpine lack `env -C`. macOS is untested; you will
+at least need `brew install flock coreutils`.
 
 **As a standalone command:**
 
@@ -60,8 +62,8 @@ agy-task -h
 /plugin install agy-task@agy-task
 ```
 
-The plugin puts `agy-task` on the Bash tool's `PATH` while it is enabled. If you already have an
-`agy-task` on your own `PATH`, yours wins.
+The skill runs the plugin's own copy by its full path, so an older `agy-task` elsewhere on your
+`PATH` does not get in the way.
 
 **Optional: follow runs from the browser.** `agy remote-control start` registers a daemon that
 shows your conversations on antigravity.google.com. agy-task passes `--remote-control` to every
@@ -90,7 +92,7 @@ agy-task [options] -p "<task>"      (or -f FILE, or the task on stdin)
 |---|---|---|
 | `AGY_TASK_MODEL` | `hydrogen` | model when `-m` is not given |
 | `AGY_TASK_WORKTREES` | `~/worktrees` | where worktrees go |
-| `AGY_TASK_HOME` | `~/.cache/agy-task` | logs, ledger, model list |
+| `AGY_TASK_HOME` | `$XDG_CACHE_HOME/agy-task`, else `~/.cache/agy-task` | logs, ledger, model list |
 | `AGY_TASK_DAEMON_UNIT` | `antigravity-cli-daemon` | systemd user unit of the remote-control daemon |
 
 ### Exit codes
@@ -100,13 +102,16 @@ agy-task [options] -p "<task>"      (or -f FILE, or the task on stdin)
 | Code | Meaning |
 |---|---|
 | 0 | done, nothing denied |
-| 2 | bad invocation (nothing ran) |
+| 2 | bad invocation or a setup failure (fetch, worktree, project) — the agent never ran |
 | 3 | agy error, or no JSON answer |
 | 4 | something was denied, or the agent reported a `MISSING COMMAND` — the answer may be incomplete |
 | 5 | empty answer despite `"status":"SUCCESS"` |
 | 6 | a read task changed files (the worktree is kept) |
 | 7 | the agent was not in the worktree |
-| 124 | time limit |
+| 124 | time limit (agy's own, or the backstop around it); any answer is partial |
+
+The receipt compares the whole working tree before and after the run, untracked files included,
+so with `-C` an edit to a file you had already changed still counts.
 
 Each run leaves `prompt.txt`, `result.json`, `stdout`, `stderr` and `git.txt` in
 `~/.cache/agy-task/<run>/`.

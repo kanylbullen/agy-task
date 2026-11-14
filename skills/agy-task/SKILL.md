@@ -8,7 +8,8 @@ description: Offload a bounded, mechanical coding task to the Antigravity CLI (a
 `agy-task` runs one task through `agy -p` in a fresh git worktree and prints git's receipt
 beside the agent's answer. The work runs on the user's Antigravity quota, not this session's.
 
-Run it as `${CLAUDE_PLUGIN_ROOT}/bin/agy-task`. `agy-task -h` lists every option.
+Run it as `${CLAUDE_PLUGIN_ROOT}/bin/agy-task`. `${CLAUDE_PLUGIN_ROOT}/bin/agy-task -h` lists
+every option.
 
 ## When to offload
 
@@ -70,7 +71,7 @@ ${CLAUDE_PLUGIN_ROOT}/bin/agy-task -r /abs/path/to/repo -b origin/main -w -a "np
 | Code | Meaning | What to do |
 |---|---|---|
 | 0 | done | check the receipt |
-| 2 | bad invocation | fix the flags; nothing ran |
+| 2 | bad invocation or setup failure | fix the flags or the repo; the agent never ran |
 | 3 | agy error / no JSON | read `stderr` in the log directory |
 | 4 | denied, or `MISSING COMMAND` | the answer may be incomplete; rerun with the right `-a` |
 | 5 | empty answer | rerun or rephrase |
@@ -79,11 +80,12 @@ ${CLAUDE_PLUGIN_ROOT}/bin/agy-task -r /abs/path/to/repo -b origin/main -w -a "np
 | 124 | time limit | raise `-t` or split the task |
 
 **The receipt is git, not the agent's answer.** For a write task, read the diff in the worktree
-before reporting anything as done. The agent does not commit; committing, pushing and opening a PR
-are yours to do after review, and only if the user wants them.
+before reporting anything as done. The agent does not commit unless an `-a` prefix covers
+`git commit` (`-a "git"` does); committing, pushing and opening a PR are yours to do after review,
+and only if the user wants them.
 
 A half-done change stays in the worktree even when the run failed — check before rerunning on
 the same branch. Clean up a write task with
 `git -C REPO worktree remove ~/worktrees/agy-NAME && git -C REPO branch -D agy/NAME`.
 
-`agy-task -u 7` shows the last week's usage per quota pot.
+`${CLAUDE_PLUGIN_ROOT}/bin/agy-task -u 7` shows the last week's usage per quota pot.

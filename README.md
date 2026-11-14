@@ -1,12 +1,12 @@
 <h1 align="center">agy-task</h1>
 
 <p align="center">
-  <strong>Put your Antigravity quota to work, and make the agent prove what it did.</strong>
+  <strong>Claude plans. Gemini does the legwork.</strong>
 </p>
 
 <p align="center">
-  One bash file that hands a coding task to the <a href="https://antigravity.google.com">Antigravity CLI</a> (<code>agy</code>), headless,<br>
-  in a git worktree of its own, and reports back with a receipt from <b>git</b> instead of the agent's word.
+  agy-task lets Claude Code hand tasks to Google's <a href="https://antigravity.google.com">Antigravity</a> models.<br>
+  Two AI providers in one workflow, and git shows what changed at every handover.
 </p>
 
 <p align="center">
@@ -17,21 +17,32 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.svg" width="840" alt="Terminal: agy-task fixes a one-line bug in a git worktree in 20 seconds. The git receipt shows one file changed, nothing was denied, and the exit code is 0.">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/workflow-dark.png">
+    <img src="assets/workflow-light.png" width="838" alt="A line map of the workflow. Claude Code's line runs straight from plan to commit. Gemini's line leaves it at each handover, does a task, and comes back where Claude checks the result. In the two tasks shown, Gemini Hydrogen audits 11 functions in 47 seconds, and fixes and tests a bug in 20 seconds.">
+  </picture>
 </p>
 <p align="center">
-  <sub>A real run on Gemini 4 Hydrogen: bug found, fixed and tested in 20 seconds. Paths shortened, answer trimmed.</sub>
+  <sub>Both tasks on the map are real runs, timed on Gemini 4 Hydrogen.</sub>
 </p>
 
-## Why you might want this
+## Why two AI providers in one workflow
 
-**You have a second quota. Use it.** Antigravity's models run on a quota of their own. Searching a
-codebase, asking one question of fifty files, running the test suite, a small mechanical fix: none
-of that has to spend your main assistant's tokens. agy-task makes handing it over a one-liner. It
-also comes as a [Claude Code plugin](#use-it-from-claude-code), so Claude can do the handing over.
+**Each model does what it is good at.** Claude Code keeps the thread. It plans the change, writes
+the handover, checks what comes back and commits. Gemini takes the legwork: searching a codebase,
+asking one question of fifty files, running the test suite, a small bounded fix. The two tasks on
+the map took it 47 and 20 seconds.
 
-**An agent's "done" is a claim. git is a receipt.** This is a real answer from `agy -p`, after a
-run that used 129k tokens (other fields left out):
+**The legwork runs on a second quota.** Antigravity's models have a quota of their own, so searches
+and test runs stop spending the tokens you want Claude to think with. Over one day of use, Gemini
+Hydrogen cost about 0.25 % of its weekly quota per 100k tokens.
+
+**You get a second opinion from another lab.** A different model misses different things. Claude
+wrote agy-task, and Gemini then reviewed it through agy-task. Fifteen of the findings held up when
+checked against the code, and all fifteen are fixed.
+
+**git keeps both honest.** An agent's "done" is a claim, whichever lab trained it. This is a real
+answer from `agy -p`, after a run that used 129k tokens (other fields left out):
 
 ```json
 {
@@ -60,7 +71,28 @@ standard Linux tools.
 
 ## Try it in a minute
 
-You need `agy` installed and signed in. Then:
+You need `agy` installed and signed in.
+
+### From Claude Code
+
+```
+/plugin marketplace add kanylbullen/agy-task
+/plugin install agy-task@agy-task
+```
+
+Then say "offload this to agy", or let Claude decide when a job fits. The plugin ships the script
+and a short [skill](skills/agy-task/SKILL.md) that teaches Claude:
+
+- **when to hand over:** mechanical work with an answer that can be checked, such as a codebase
+  search, the same question asked of many files, a test run, or a bounded fix with a test command
+- **when not to:** secrets, production data, access control, payments, and design decisions
+- **how to hand over:** the agent starts cold, so the prompt carries the goal, the files already
+  found, the trap, the test command and what done looks like
+- **what to trust:** the exit code and the git receipt, read before anything is reported as done
+
+The skill is about 100 lines. Read it before you install the plugin.
+
+### From your shell
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/kanylbullen/agy-task/main/bin/agy-task \
@@ -88,6 +120,15 @@ That fetches `origin`, creates the branch `agy/fix-pagination` in `~/worktrees/a
 and lets the agent edit files there and run `npm test`, but no other command. The work happens in
 the worktree, not in your checkout, and nothing is committed. You read the diff, then commit and
 push it yourself.
+
+## What a handover looks like
+
+<p align="center">
+  <img src="assets/demo.svg" width="840" alt="Terminal: agy-task fixes a one-line bug in a git worktree in 20 seconds. The git receipt shows one file changed, nothing was denied, and the exit code is 0.">
+</p>
+<p align="center">
+  <sub>The second task on the map, as it ran: bug found, fixed and tested in 20 seconds. Paths shortened, answer trimmed.</sub>
+</p>
 
 ## When something goes wrong, it says so
 
@@ -124,41 +165,28 @@ Exit code `0` is the only finished outcome:
 | 7 | the agent was not in the worktree |
 | 124 | time limit; any answer is partial |
 
-## Use it from Claude Code
+## The workflow, stop by stop
 
-```
-/plugin marketplace add kanylbullen/agy-task
-/plugin install agy-task@agy-task
-```
+The map at the top is also how agy-task is built.
 
-The plugin ships the script and a short [skill](skills/agy-task/SKILL.md) that teaches Claude:
-
-- **when to offload:** mechanical work with an answer that can be checked, such as a codebase
-  search, the same question asked of many files, a test run, or a bounded fix with a test command
-- **when not to:** secrets, production data, access control, payments, and design decisions
-- **how to hand over:** the agent starts cold, so the prompt carries the goal, the files already
-  found, the trap, the test command and what done looks like
-- **what to trust:** the exit code and the git receipt, read before anything is reported as done
-
-Then say "offload this to agy", or let Claude decide when a job fits. The skill is about 90 lines. Read
-it before you install the plugin.
-
-## How it works
-
-1. **Makes a worktree** of `REPO` at `REF` (`-r REPO -b REF`). The remote is fetched first, so the
-   agent never builds on a stale local branch. A write task gets a branch `agy/NAME`. A read task
-   gets a detached worktree that is removed afterwards. `-C DIR` runs in a directory as it is.
-2. **Locks the permissions down.** Read tasks deny every file write. Shell commands are denied
-   unless they start with a prefix you allowed with `-a`, plus a few read-only defaults
-   (`pwd`, `git status/log/diff/show`, `ls`, `wc`, `rg`).
-3. **Tells the agent the rules** in a short preamble: where it is, what it may run, and to write
-   `MISSING COMMAND: …` instead of inventing output for a command it was not allowed to run.
-4. **Runs `agy -p`** with a time limit and JSON output. By default the run can be followed live on
-   antigravity.google.com, filed under a project named after the repository.
-5. **Prints the receipt.** It hashes the whole working tree before and after the run, untracked
-   files included, and shows the commits and files that changed in between. The exit code is
-   non-zero whenever something was denied, missing or wrong.
-6. **Logs one line per run** to a ledger, so `agy-task -u 7` shows what the week cost per model.
+1. **Plan.** Claude, or you, writes the task. The agent on the other side starts cold, so the
+   handover carries the goal, the files already found, the trap, the test command and what done
+   looks like.
+2. **Hand over.** agy-task makes a worktree of `REPO` at `REF` (`-r REPO -b REF`). The remote is
+   fetched first, so the agent never builds on a stale local branch. A write task gets a branch
+   `agy/NAME`. A read task gets a detached worktree that is removed afterwards. `-C DIR` runs in a
+   directory as it is. Then the permissions are locked down: read tasks deny every file write, and
+   shell commands are denied unless they start with a prefix you allowed with `-a`, plus a few
+   read-only defaults (`pwd`, `git status/log/diff/show`, `ls`, `wc`, `rg`). A short preamble tells
+   the agent where it is, what it may run, and to write `MISSING COMMAND: …` instead of inventing
+   output for a command it was not allowed to run.
+3. **Gemini works.** `agy -p` runs with a time limit and JSON output. By default the run can be
+   followed live on antigravity.google.com, filed under a project named after the repository.
+4. **Check.** agy-task hashes the whole working tree before and after the run, untracked files
+   included, and prints the commits and files that changed in between, beside the agent's answer.
+   The exit code is non-zero whenever something was denied, missing or wrong.
+5. **Commit.** The agent commits nothing. Claude, or you, reads the diff and commits it. Each run
+   is also logged to a ledger, so `agy-task -u 7` shows what the week cost per model.
 
 ## Numbers
 

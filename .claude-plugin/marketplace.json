@@ -1,0 +1,12 @@
+{
+  "name": "agy-task",
+  "owner": { "name": "kanylbullen" },
+  "description": "Offload bounded coding tasks to the Antigravity CLI (agy), headless, in a git worktree of their own.",
+  "plugins": [
+    {
+      "name": "agy-task",
+      "source": "./",
+      "description": "The agy-task script and a skill telling Claude when and how to offload work to Antigravity."
+    }
+  ]
+}

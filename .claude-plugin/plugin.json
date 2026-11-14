@@ -1,0 +1,9 @@
+{
+  "name": "agy-task",
+  "version": "0.1.0",
+  "description": "Offload bounded coding tasks to the Antigravity CLI (agy), headless in a git worktree, and read the result from git.",
+  "author": { "name": "kanylbullen" },
+  "repository": "https://github.com/kanylbullen/agy-task",
+  "license": "MIT",
+  "keywords": ["antigravity", "agy", "gemini", "offload", "worktree"]
+}

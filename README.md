@@ -38,8 +38,9 @@ and test runs stop spending the tokens you want Claude to think with. Over one d
 Hydrogen cost about 0.25 % of its weekly quota per 100k tokens.
 
 **You get a second opinion from another lab.** A different model misses different things. Claude
-wrote agy-task, and Gemini then reviewed it through agy-task. Fifteen of the findings held up when
-checked against the code, and all fifteen are fixed.
+wrote agy-task, and two Gemini models then reviewed it through agy-task. Fifteen of their findings
+held up when checked against the code, and all fifteen are fixed. A third review, by Claude Opus
+through the same tool, found the worst bug of the lot, which neither Gemini model had seen.
 
 **git keeps both honest.** An agent's "done" is a claim, whichever lab trained it. This is a real
 answer from `agy -p`, after a run that used 129k tokens (other fields left out):
@@ -56,9 +57,12 @@ A tool call was denied and the response is empty, yet the status says `SUCCESS`.
 on that, names what was denied, and prints what git says changed. That is the one account you can
 check.
 
-**The agent stays in its lane.** Every task gets a fresh worktree at the ref you name. A read task
-denies every file write. Shell commands are denied unless you allowed them by prefix, and that
-includes `git commit` and `git push`.
+**The agent stays in its lane, within limits.** Every task gets a fresh worktree at the ref you
+name. Shell commands are denied unless you allowed them by prefix, and that includes `git commit`
+and `git push`. A read task denies every file write and runs in agy's terminal sandbox, and the
+commands it may run by default can neither write a file nor start a program. A write task runs
+outside that sandbox, so agy's edit tools can write outside the worktree too, and the git receipt
+covers the worktree only ([trap 12](#twelve-things-agy--p-will-not-tell-you)).
 
 **You can read it before you run it.** One file, about 500 lines of bash, built on git, jq and
 standard Linux tools.
@@ -150,7 +154,7 @@ agy-task: FAILED: denied: missing command: python3 --version — the answer may 
 
 The exit code was 4. The agent did the part it could and named the command it lacked, instead of
 making up what the command would have printed. Models do make that up when nobody tells them not
-to (see [the traps](#ten-things-agy--p-will-not-tell-you)).
+to (see [the traps](#twelve-things-agy--p-will-not-tell-you)).
 
 Exit code `0` is the only finished outcome:
 
@@ -177,7 +181,9 @@ The map at the top is also how agy-task is built.
    `agy/NAME`. A read task gets a detached worktree that is removed afterwards. `-C DIR` runs in a
    directory as it is. Then the permissions are locked down: read tasks deny every file write, and
    shell commands are denied unless they start with a prefix you allowed with `-a`, plus a few
-   read-only defaults (`pwd`, `git status/log/diff/show`, `ls`, `wc`, `rg`). A short preamble tells
+   defaults that can neither write a file nor start a program (`pwd`, `ls`, `wc`, `grep`,
+   `git status`). A read task's commands run in agy's sandbox, which gets read-only access to the
+   repository's git directory so that git works inside the worktree. A short preamble tells
    the agent where it is, what it may run, and to write `MISSING COMMAND: …` instead of inventing
    output for a command it was not allowed to run.
 3. **Gemini works.** `agy -p` runs with a time limit and JSON output. By default the run can be
@@ -207,6 +213,10 @@ on Hydrogen.
 **agy-task reviewed itself.** Version 0.1.1 came out of two read tasks run on this repository.
 Hydrogen took 105 s and 55k tokens and reported 9 findings. Argon took 499 s and 80k tokens and
 reported 22. Fifteen findings held up when checked against the code, and all fifteen are fixed.
+Later the same review of the same commit ran on Claude Opus 5.5 through Antigravity, in 292 s and
+84k tokens. It found fewer of the known bugs than Argon, and seven that neither Gemini model had
+found. One was the worst so far: two default commands let a read task write files and run
+programs (`git log --output=FILE`, `rg --pre PROGRAM`). Version 0.3.0 fixes them.
 
 ### Keep the scarce model for the jobs that need it
 
@@ -239,7 +249,7 @@ account the whole Argon week came to roughly 3.6M tokens, so 700k is about a fif
 about two fifths. On a larger plan, scale the number with your limit. The budget counts agy-task's
 own runs, not other clients.
 
-## Ten things `agy -p` will not tell you
+## Twelve things `agy -p` will not tell you
 
 Each of these cost real time to find. Measured on **agy 1.5.9, November 2026**. agy moves fast, so
 if one of them stops being true, please open an issue.
@@ -251,7 +261,9 @@ if one of them stops being true, please open an issue.
    needs a deny rule, `write_file(*)`, which also stops the edit tools. A hit on that rule does
    **not** appear in `denied_actions`. Only git shows it.
 3. **Allow rules are prefixes.** `command(npm test)` allows `npm test -- foo`. `command(npm*)`
-   matches nothing, silently.
+   matches nothing, silently. Nor can a prefix forbid an option: `command(git log)` allows
+   `git log --output=FILE`, which writes a file, and `command(rg)` allows `rg --pre PROGRAM`,
+   which runs one. agy-task's defaults leave both out.
 4. **A command with a shell operator is always denied headless**, whatever rule matches.
    `&&`, `;`, `|` and redirections trigger agy's `unquoted_shell_operators` check, which needs a
    confirmation nobody is there to give. `denied_actions` does not say why. The reason is only in
@@ -277,6 +289,17 @@ if one of them stops being true, please open an issue.
 10. **The remote page names a conversation after the start of its first message.** agy-task opens
     the prompt with `<job name> — <first line of the task>`, so a descriptive `-n` and first line
     are worth a moment.
+11. **A read task's commands run in a sandbox that mounts only the workspace.** The workspace's own
+    `.git` is read-only in there. `/tmp` and toolchain caches such as `~/.cache`, `~/.cargo`,
+    `~/.npm` and `~/.nvm` are writable. A linked worktree's `.git` points into the main checkout,
+    which is not mounted, so git said `fatal: not a git repository`. `--add-dir` mounts the main
+    checkout's git directory, but as the first working directory, and the agent then ran there
+    (trap 8 again). An allow rule `read_file(PATH)` mounts `PATH` read-only and leaves the working
+    directory alone. agy-task adds one for the repository's git directory.
+12. **A write task runs without the sandbox.** In `--mode accept-edits` its commands see the whole
+    filesystem, and the edit tools wrote a file outside the workspace without asking. The git
+    receipt covers the worktree only, so give write tasks only repositories whose content you
+    trust.
 
 And two that are not agy's fault:
 
@@ -331,7 +354,9 @@ conversations on antigravity.google.com. agy-task passes `--remote-control` to e
 off with `-L`.
 
 **After a write task.** Read the diff in the worktree, then commit, push and open the PR yourself.
-Clean up with:
+The receipt's `clean up:` line has the exact command that removes the worktree and the branch. It
+refuses while the worktree has uncommitted changes; add `--force` after `remove` to throw them away.
+With the default `AGY_TASK_WORKTREES` it is:
 
 ```sh
 git -C REPO worktree remove ~/worktrees/agy-NAME && git -C REPO branch -D agy/NAME
@@ -342,9 +367,11 @@ git -C REPO worktree remove ~/worktrees/agy-NAME && git -C REPO branch -D agy/NA
 **Does it commit or push?** No. `git commit` and `git push` are not on the allow list, so the
 agent's attempts are denied. Add `-a "git commit"` if you want the agent to commit.
 
-**Can a read task change my files?** Every file write is denied, and the default commands only
-read. If something changes anyway, the receipt shows it, the exit code is 6 and the worktree is
-kept for you to inspect.
+**Can a read task change my files?** Every file write is denied, its commands run in agy's
+sandbox, and none of the default commands can write a file or start a program. A command you add
+with `-a` may: a test runner runs the repository's own code. If the worktree changes anyway, the
+receipt shows it, the exit code is 6 and the worktree is kept for you to inspect. A change outside
+the worktree does not show up there.
 
 **Which model should I use?** Hydrogen, the default, for nearly everything. Switch with `-m`,
 using a short name such as `argon` or `flash-high`, or any id from `agy models`. Argon is for a

@@ -31,6 +31,9 @@ Work with an answer you can check, where the checking is cheaper than the doing:
 - Design decisions. A task with three reasonable approaches is a choice for the user, not
   something to offload.
 - Anything whose result you need to weigh with this conversation's context.
+- A write task on a repository whose content you do not trust. A write task runs outside agy's
+  sandbox, so the agent's edits are not confined to the worktree, and the receipt covers the
+  worktree only.
 
 ## Writing the task
 
@@ -59,7 +62,12 @@ ${CLAUDE_PLUGIN_ROOT}/bin/agy-task -r /abs/path/to/repo -b origin/main -w -a "np
 - `-a PREFIX` allows shell commands starting with PREFIX. **No shell operators**: `&&`, `;`, `|`,
   `<`, `>` are always denied headless. For another directory use `-a "env -C web npm test"`,
   never `cd web && npm test`.
-- A long prompt goes in a file with `-f FILE`, or on stdin.
+- A read task may always run `pwd`, `ls`, `wc`, `grep` and `git status`. `git log`, `git diff`,
+  `git show` and `rg` need `-a`, and each is a way out: `--output=FILE` writes a file wherever the
+  sandbox can reach, and `rg --pre` runs a program. Add them only when the task needs them, on the
+  user's own repositories.
+- A long prompt goes in a file with `-f FILE`, or on stdin. Past about 120 KB it is refused: agy
+  takes the task as a single command-line argument.
 - Runs take from ten seconds to several minutes. Run anything longer than a quick read in the
   background and wait for it to finish rather than polling.
 - **Stay on the default model, Hydrogen.** Argon draws on a small weekly quota: one long write
@@ -90,7 +98,6 @@ before reporting anything as done. The agent does not commit unless an `-a` pref
 and only if the user wants them.
 
 A half-done change stays in the worktree even when the run failed — check before rerunning on
-the same branch. Clean up a write task with
-`git -C REPO worktree remove ~/worktrees/agy-NAME && git -C REPO branch -D agy/NAME`.
+the same branch. Clean up with the command on the receipt's `clean up:` line.
 
 `${CLAUDE_PLUGIN_ROOT}/bin/agy-task -u 7` shows the last week's usage per quota pot.

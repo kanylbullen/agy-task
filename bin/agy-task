@@ -21,7 +21,7 @@
 # README.md has the full list of traps: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.2.0
+VERSION=0.3.0
 
 # Settings. The environment wins, then an optional config file of KEY=VALUE
 # lines, then the defaults. The file exists so that every caller on the machine
@@ -41,10 +41,19 @@ fi
 MODEL_DEFAULT=${AGY_TASK_MODEL:-hydrogen}
 WT_ROOT=${AGY_TASK_WORKTREES:-$HOME/worktrees}
 LOG_ROOT=${AGY_TASK_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/agy-task}
+# A relative path would mean one place to `git -C REPO` and another to everything else.
+[[ $WT_ROOT == /* ]] || WT_ROOT=$PWD/$WT_ROOT
+[[ $LOG_ROOT == /* ]] || LOG_ROOT=$PWD/$LOG_ROOT
 DAEMON_UNIT=${AGY_TASK_DAEMON_UNIT:-antigravity-cli-daemon}
 # Weekly token budgets per quota pot, e.g. "argon=700k claude+gpt=300k". None by default.
 BUDGET=${AGY_TASK_BUDGET:-}
-DEFAULT_ALLOW=("pwd" "git status" "git log" "git diff" "git show" "ls" "wc" "rg")
+# Commands the agent may always run. None of them can write a file or start a
+# program. That rules out `git log/diff/show`, whose --output=FILE writes any
+# file, and `rg`, whose --pre runs any program: agy's terminal sandbox leaves
+# ~/.cargo, ~/.nvm and ~/.npm writable, so either could plant something the
+# shell or a build runs later. An allow rule is a prefix and cannot forbid an
+# option, so those are left to -a.
+DEFAULT_ALLOW=("pwd" "ls" "wc" "grep" "git status")
 LEDGER=$LOG_ROOT/ledger.tsv
 MODELS_CACHE=$LOG_ROOT/.models
 
@@ -99,13 +108,25 @@ pot_used() {
     'NR > 1 && $2 >= since && $5 == pot { t += $13 } END { printf "%d\n", t }' "$LEDGER"
 }
 
-# The main checkout of the repository DIR belongs to, also when DIR is a linked
-# worktree or a subdirectory. (`rev-parse --path-format` would do it in one step,
-# but needs git 2.31.)
-main_root() {
-  local common
-  common=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 1
-  (cd -- "$1" && cd -- "$common/.." && pwd -P)
+# The git directory that every worktree of DIR's repository shares, as an
+# absolute path. (`rev-parse --path-format` would do it in one step, but needs
+# git 2.31.)
+git_common_dir() (
+  cd -- "$1" 2>/dev/null || exit 1
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || exit 1
+  cd -- "$common" 2>/dev/null && pwd -P
+)
+
+# The repository's name, the same for each of its worktrees and subdirectories.
+repo_name() {
+  local common=$1 dir=$2 b
+  case $common in
+    */.git) basename -- "$(dirname -- "$common")" ;;
+    # A submodule keeps its git directory inside the superproject's.
+    */.git/modules/*) basename -- "$(git -C "$dir" rev-parse --show-toplevel)" ;;
+    # A bare repository.
+    *) b=$(basename -- "$common"); echo "${b%.git}" ;;
+  esac
 }
 
 # A hash of the whole working tree, untracked files included and ignored ones
@@ -197,12 +218,16 @@ Where the run happens (exactly one):
   -C DIR           run in DIR as it is, no worktree
 
 Permissions:
-  -w               may write files (otherwise every file write is denied)
+  -w               may write files (otherwise every file write is denied). A read task runs in agy's
+                   terminal sandbox; a write task runs outside it, and agy's edit tools can then
+                   write outside the worktree. The receipt covers the worktree only.
   -a PREFIX        allow shell commands starting with PREFIX; repeat as needed.
                    A prefix, not a glob: -a "npm test" allows "npm test -- x"; "npm*" matches nothing.
                    No shell operators (&& ; | < >): agy always denies them headless. Another directory:
                    -a "env -C web npm test" instead of "cd web && npm test".
-                   Always allowed: pwd, git status/log/diff/show, ls, wc, rg
+                   Always allowed: pwd, ls, wc, grep, git status. Not git log/diff/show (--output
+                   writes any file) or rg (--pre runs any program): add those only for a repository
+                   whose content you trust.
 
 Model:
   -m MODEL         a short name (argon, hydrogen, flash, opus, sonnet, ... with -low/-medium/-high/-xhigh
@@ -238,7 +263,8 @@ Settings: AGY_TASK_MODEL, AGY_TASK_BUDGET, AGY_TASK_WORKTREES (default ~/worktre
           From the environment, or as KEY=VALUE lines in ${XDG_CONFIG_HOME:-~/.config}/agy-task/config
           (the environment wins), so that every caller on the machine gets the same settings.
 
-Clean up a write task:  git -C REPO worktree remove ~/worktrees/agy-NAME && git -C REPO branch -D agy/NAME
+Clean up a write task: the receipt prints the command, which is
+  git -C REPO worktree remove $AGY_TASK_WORKTREES/agy-NAME && git -C REPO branch -D agy/NAME
 EOF
 }
 
@@ -280,12 +306,19 @@ done
 shift $((OPTIND - 1))
 [ $# -eq 0 ] || die "unexpected arguments: $* (the task goes in -p, -f or stdin)"
 
+[ -n "$prompt" ] && [ -n "$prompt_file" ] && die "-p and -f both give the task; use one of them"
 if [ -n "$prompt_file" ]; then
   prompt=$(cat -- "$prompt_file") || die "cannot read $prompt_file"
 elif [ -z "$prompt" ] && [ ! -t 0 ]; then
   prompt=$(cat)
 fi
 [ -n "${prompt//[[:space:]]/}" ] || die "no task (-p, -f or stdin)"
+# agy takes the task as one command-line argument, and Linux caps a single
+# argument at 128 KiB (MAX_ARG_STRLEN): past that the exec fails with E2BIG.
+# The limit leaves room for the preamble.
+prompt_bytes=$(printf %s "$prompt" | wc -c)
+[ "$prompt_bytes" -le 120000 ] ||
+  die "the task is $prompt_bytes bytes, and agy takes it as one command-line argument, which Linux caps at 128 KiB. Put the bulk in a file the agent can read (committed at the ref, for -r) and point the task at it"
 
 [ -n "$repo" ] && [ -n "$dir" ] && die "-r and -C are mutually exclusive"
 [ -z "$repo" ] && [ -z "$dir" ] && die "say where: -r REPO -b REF (worktree) or -C DIR"
@@ -340,10 +373,12 @@ run_id="$(date +%Y%m%d-%H%M%S)-$name"
 logdir=$LOG_ROOT/$run_id
 mkdir "$logdir" 2>/dev/null || die "cannot create $logdir (does a run by that name already exist? pick another -n)"
 
-is_git=0 wt=0 base_sha="" before="" branch=""
+is_git=0 wt=0 base_sha="" before="" branch="" git_common=""
 if [ -n "$repo" ]; then
-  repo=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die "$repo is not a git repository"
-  proj_root=$(main_root "$repo") || die "cannot find the main checkout of $repo"
+  top=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) ||
+    die "$repo is not a git work tree (for a bare repository, pass one of its worktrees)"
+  repo=$top
+  git_common=$(git_common_dir "$repo") || die "cannot find the git directory of $repo"
   dir=$WT_ROOT/agy-$name
   [ -e "$dir" ] && die "$dir already exists — pick another -n"
   [ $write = 1 ] && git -C "$repo" show-ref -q --verify "refs/heads/agy/$name" &&
@@ -354,9 +389,7 @@ else
   # Exit status alone is not enough: inside .git, rev-parse prints "false" and succeeds.
   if [ "$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then
     is_git=1
-    proj_root=$(main_root "$dir") || proj_root=$dir
-  else
-    proj_root=$dir
+    git_common=$(git_common_dir "$dir") || git_common=""
   fi
 fi
 
@@ -375,7 +408,8 @@ fi
 # goes first in the conversation's working directories, and run_command has no
 # cwd of its own. The project is a label for the remote page, not a workplace.
 if [ -z "$project" ]; then
-  if [ -n "$repo" ] || [ $is_git = 1 ]; then project=$(basename "$proj_root"); else project=agy-task; fi
+  project=$([ -n "$git_common" ] && repo_name "$git_common" "${repo:-$dir}")
+  project=${project:-agy-task}
 fi
 proj_dir=$HOME/.gemini/config/projects
 mkdir -p "$proj_dir"
@@ -423,9 +457,10 @@ fi
 # --- the worktree ---------------------------------------------------------------
 if [ -n "$repo" ]; then
   # Two jobs against one repo at the same moment fetched together, and one died
-  # with "cannot lock ref". The lock queues them, keyed on the main checkout so
-  # that its worktrees share it; it is released once the worktree exists.
-  exec 8>"$LOG_ROOT/.git-$(printf %s "$proj_root" | cksum | cut -d' ' -f1).lock"
+  # with "cannot lock ref". The lock queues them, keyed on the shared git
+  # directory so that all worktrees of a repo use one; it is released once the
+  # worktree exists.
+  exec 8>"$LOG_ROOT/.git-$(printf %s "$git_common" | cksum | cut -d' ' -f1).lock"
   flock 8
   git_remote=${base%%/*}
   if [ "$git_remote" != "$base" ] && git -C "$repo" remote | grep -Fqx -- "$git_remote"; then
@@ -454,9 +489,19 @@ fi
 [ $is_git = 1 ] && before=$(tree_state "$dir")
 
 # --- permissions and prompt -----------------------------------------------------
-settings=$(jq -cn --argjson w "$write" '
+# **agy runs a read task's commands in a terminal sandbox that mounts only the
+# workspace.** A linked worktree's .git file points into the main checkout, so
+# git inside found no repository ("fatal: not a git repository"). --add-dir
+# mounts it, but as the first working directory, so the agent then ran there.
+# An allow rule read_file(PATH) mounts PATH read-only and leaves the working
+# directory alone. A write task runs outside the sandbox (measured on agy 1.5.9),
+# where the rule changes nothing.
+grant=""
+[ -n "$git_common" ] && [[ $git_common != "$dir"/* ]] && grant=$git_common
+settings=$(jq -cn --argjson w "$write" --arg grant "$grant" '
   {permissions: (
-     {allow: ($ARGS.positional | map("command(" + . + ")"))}
+     {allow: (($ARGS.positional | map("command(" + . + ")"))
+              + (if $grant == "" then [] else ["read_file(" + $grant + ")"] end))}
      + (if $w == 1 then {} else {deny: ["write_file(*)"]} end)
   )}' --args "${allow[@]}")
 
@@ -496,9 +541,10 @@ args=(-p "$full" --output-format json --model "$model" --print-timeout "${secs}s
 
 # --- run --------------------------------------------------------------------------
 echo "agy-task: $name · $model (pot $pot$budget_note) · $([ $write = 1 ] && echo write || echo read) · project $project$([ $live = 1 ] && echo ' · live on antigravity.google.com') · $dir" >&2
+started=$(date +%s)
 (cd "$dir" && timeout -k 30 $((secs + 120)) agy "${args[@]}") \
   >"$logdir/stdout" 2>"$logdir/stderr" </dev/null
-rc=$?
+rc=$? elapsed=$(($(date +%s) - started))
 
 json=$(grep '^{' "$logdir/stdout" | tail -n 1)
 printf '%s\n' "$json" >"$logdir/result.json"
@@ -559,13 +605,23 @@ if [ $wt = 1 ] && [ $write = 0 ]; then
 elif [ -n "$branch" ]; then
   where+="  (branch $branch)"
 fi
+cleanup=""
+if [ -n "$branch" ]; then
+  printf -v cleanup 'git -C %q worktree remove %q && git -C %q branch -D %q' "$repo" "$dir" "$repo" "$branch"
+elif [ $wt = 1 ] && [ -d "$dir" ]; then
+  printf -v cleanup 'git -C %q worktree remove --force %q' "$repo" "$dir"
+fi
 
 # --- the outcome -----------------------------------------------------------------
 code=0 why=""
 # agy's own --print-timeout fires first and answers status ERROR with
 # "print timeout after …"; the outer `timeout` is only the backstop.
-if [ $rc = 124 ] || [ $rc = 137 ] || [[ $agy_error == *"print timeout"* ]]; then
+# The outer timeout sends KILL (exit 137) 150 s after the limit. A 137 before
+# the limit is something else killing agy, such as the kernel's OOM killer.
+if [ $rc = 124 ] || { [ $rc = 137 ] && [ $elapsed -ge $secs ]; } || [[ $agy_error == *"print timeout"* ]]; then
   code=124 why="hit the time limit of $tmo (any answer is partial)"
+elif [ $rc = 137 ]; then
+  code=3 why="agy was killed after ${elapsed}s, before the time limit (out of memory?)"
 elif [ -z "$json" ]; then code=3 why="no JSON answer from agy (exit $rc, see stderr)"
 elif [ "$status" != SUCCESS ]; then code=3 why="agy answered status=$status${agy_error:+: $agy_error}"
 elif [ -n "$wrong_cwd" ]; then code=7 why="the agent ran in $wrong_cwd, not in $dir — start a new conversation (without -c) and check $wrong_cwd"
@@ -593,7 +649,8 @@ fi
 cat <<EOF
 == agy-task $name · $model (pot $pot) · ${dur}s · $tokens tokens
 directory:    $where
-project:      $project
+${cleanup:+clean up:     $cleanup
+}project:      $project
 conversation: ${conv_id:--}
 log:          $logdir
 -- git (the receipt, not the agent's word) --

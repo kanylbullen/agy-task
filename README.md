@@ -299,8 +299,11 @@ if one of them stops being true, please open an issue.
 12. **A write task's commands run without the sandbox.** In `--mode accept-edits` they see the
     whole filesystem and reach the network. agy's edit tools are stricter: a write into the home
     directory was denied, but one into `/tmp` went through without asking. The git receipt covers
-    the worktree only, so give write tasks only repositories whose content you
-    trust.
+    the worktree only, so give write tasks only repositories whose content you trust, or pass
+    `-S`. That adds agy's `--sandbox`, which puts the commands in the sandbox and still honours the
+    allow list, at a price: no network, so builds need their dependencies cached, and no commits,
+    since the git directory is read-only there. `--mode auto` sandboxes too, but its reviewer
+    agent ran a command that was not on the allow list.
 
 And two that are not agy's fault:
 
@@ -319,6 +322,7 @@ agy-task [options] -p "<task>"      (or -f FILE, or the task on stdin)
   -r REPO -b REF   fresh worktree of REPO at REF (remote fetched first)
   -C DIR           run in DIR as it is
   -w               may write files
+  -S               a write task's commands run in agy's sandbox too (no network, no commits)
   -a PREFIX        allow shell commands starting with PREFIX (repeatable)
   -m MODEL         short name (hydrogen, argon, flash, opus, sonnet … with -low/-medium/-high/-xhigh)
                    or a full id from `agy models`

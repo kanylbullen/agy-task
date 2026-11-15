@@ -21,7 +21,7 @@
 # README.md has the full list of traps: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.3.1
+VERSION=0.4.0
 
 # Settings. The environment wins, then an optional config file of KEY=VALUE
 # lines, then the defaults. The file exists so that every caller on the machine
@@ -221,7 +221,11 @@ Permissions:
   -w               may write files (otherwise every file write is denied). A read task runs in agy's
                    terminal sandbox; a write task's commands run outside it, with the whole
                    filesystem and the network. The receipt covers the worktree only.
-  -a PREFIX        allow shell commands starting with PREFIX; repeat as needed.
+  -S               run a write task's commands in agy's terminal sandbox too: no network, the home
+                   directory read-only apart from caches such as ~/.cargo and ~/.npm, and no
+                   commits (the git directory is read-only there). Builds need their dependencies
+                   cached already.
+  -a PREFIX       allow shell commands starting with PREFIX; repeat as needed.
                    A prefix, not a glob: -a "npm test" allows "npm test -- x"; "npm*" matches nothing.
                    No shell operators (&& ; | < >): agy always denies them headless. Another directory:
                    -a "env -C web npm test" instead of "cd web && npm test".
@@ -269,10 +273,10 @@ EOF
 }
 
 dir="" repo="" base="" write=0 model="" name="" tmo=30m schema="" conv="" keep=0
-prompt="" prompt_file="" project="" live=1 over_budget=0
+prompt="" prompt_file="" project="" live=1 over_budget=0 sandbox=0
 allow=("${DEFAULT_ALLOW[@]}")
 
-while getopts ":C:r:b:wa:m:n:t:s:c:kp:f:P:LBu:Vh" opt; do
+while getopts ":C:r:b:wSa:m:n:t:s:c:kp:f:P:LBu:Vh" opt; do
   case $opt in
     u) usage_report "$OPTARG"; exit 0 ;;
     B) over_budget=1 ;;
@@ -296,6 +300,7 @@ while getopts ":C:r:b:wa:m:n:t:s:c:kp:f:P:LBu:Vh" opt; do
     s) schema=$OPTARG ;;
     c) conv=$OPTARG ;;
     k) keep=1 ;;
+    S) sandbox=1 ;;
     p) prompt=$OPTARG ;;
     f) prompt_file=$OPTARG ;;
     h) usage; exit 0 ;;
@@ -325,6 +330,17 @@ prompt_bytes=$(printf %s "$prompt" | wc -c)
 [ -n "$repo" ] && [ -z "$base" ] && die "-r needs -b, e.g. -b origin/main — without it the agent gets whatever the checkout happens to be on"
 [ -z "$repo" ] && [ -n "$base" ] && die "-b goes with -r"
 [[ $base == -* ]] && die "-b should be a ref such as origin/main, not \"$base\""
+
+# Commits are allowed when some -a prefix covers `git commit`: "git", "git commit",
+# or a longer one such as "git commit -m".
+may_commit=0
+for p in "${allow[@]}"; do
+  [[ "git commit" == "$p"* || "$p" == "git commit "* ]] && may_commit=1
+done
+# In the sandbox the repository's git directory is mounted read-only, so a
+# commit fails halfway through the run. Say so before anything is created.
+[ $sandbox = 1 ] && [ $may_commit = 1 ] &&
+  die "-S and an -a that allows git commit do not go together: in agy's sandbox the git directory is read-only. Drop -S, or commit after the run"
 
 # The process id keeps two unnamed runs started in the same second apart.
 name=${name:-$(date +%m%d-%H%M%S)-$$}
@@ -520,12 +536,8 @@ pre+=$'\n'"Run \`pwd\` as your very first shell command. If it prints anything o
 pre+=$'\n'"Shell commands you may run start with: $allowed_list. Anything else is denied automatically."
 pre+=$'\n'"A command containing &&, ;, |, < or > is always denied, even when it starts correctly. Run one command at a time, and use \`env -C DIR COMMAND\` when something has to run in another directory."
 pre+=$'\n'"If you need a command that is not allowed: do not run it, do not work around it, and do not make up what it would have printed. Write a line of its own starting with 'MISSING COMMAND:' followed by the command instead, and carry on with what you can do."
-# Commits are allowed when some -a prefix covers `git commit`: "git", "git commit",
-# or a longer one such as "git commit -m".
-may_commit=0
-for p in "${allow[@]}"; do
-  [[ "git commit" == "$p"* || "$p" == "git commit "* ]] && may_commit=1
-done
+[ $write = 1 ] && [ $sandbox = 1 ] &&
+  pre+=$'\n'"Shell commands run in a sandbox without network access, so anything that downloads will fail: use what is already installed or cached."
 [ $write = 1 ] && [ $may_commit = 0 ] &&
   pre+=$'\n'"Do not commit; the changes are reviewed and committed afterwards."
 pre+=$'\n'"Finish with: what you did, what you could not do, and why."
@@ -536,11 +548,15 @@ args=(-p "$full" --output-format json --model "$model" --print-timeout "${secs}s
       --settings "$settings" --disable-slash-commands --project "$project_id")
 [ $live = 1 ] && args+=(--remote-control)
 [ $write = 1 ] && args+=(--mode accept-edits)
+# A read task's commands run in the sandbox anyway (default mode); --sandbox
+# puts a write task's there too, and the allow list still applies. (--mode auto
+# also sandboxes, but its reviewer runs commands that are not on the list.)
+[ $sandbox = 1 ] && args+=(--sandbox)
 [ -n "$schema" ] && args+=(--json-schema "$schema")
 [ -n "$conv" ] && args+=(--conversation "$conv")
 
 # --- run --------------------------------------------------------------------------
-echo "agy-task: $name · $model (pot $pot$budget_note) · $([ $write = 1 ] && echo write || echo read) · project $project$([ $live = 1 ] && echo ' · live on antigravity.google.com') · $dir" >&2
+echo "agy-task: $name · $model (pot $pot$budget_note) · $([ $write = 1 ] && echo write || echo read)$([ $write = 1 ] && [ $sandbox = 1 ] && echo ', sandboxed') · project $project$([ $live = 1 ] && echo ' · live on antigravity.google.com') · $dir" >&2
 started=$(date +%s)
 (cd "$dir" && timeout -k 30 $((secs + 120)) agy "${args[@]}") \
   >"$logdir/stdout" 2>"$logdir/stderr" </dev/null

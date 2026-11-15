@@ -33,7 +33,8 @@ Work with an answer you can check, where the checking is cheaper than the doing:
 - Anything whose result you need to weigh with this conversation's context.
 - A write task on a repository whose content you do not trust. A write task's commands run outside
   agy's sandbox, with the whole filesystem and the network, and the receipt covers the worktree
-  only.
+  only. `-S` runs them in the sandbox, without network and without commits; it fits a task whose
+  test command works offline.
 
 ## Writing the task
 

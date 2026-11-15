@@ -60,8 +60,8 @@ check.
 **The agent stays in its lane, within limits.** Every task gets a fresh worktree at the ref you
 name. Shell commands are denied unless you allowed them by prefix, and that includes `git commit`
 and `git push`. A read task denies every file write and runs in agy's terminal sandbox, and the
-commands it may run by default can neither write a file nor start a program. A write task runs
-outside that sandbox, so agy's edit tools can write outside the worktree too, and the git receipt
+commands it may run by default can neither write a file nor start a program. A write task's
+commands run outside that sandbox, with the whole filesystem and the network, and the git receipt
 covers the worktree only ([trap 12](#twelve-things-agy--p-will-not-tell-you)).
 
 **You can read it before you run it.** One file, about 500 lines of bash, built on git, jq and
@@ -296,9 +296,10 @@ if one of them stops being true, please open an issue.
     checkout's git directory, but as the first working directory, and the agent then ran there
     (trap 8 again). An allow rule `read_file(PATH)` mounts `PATH` read-only and leaves the working
     directory alone. agy-task adds one for the repository's git directory.
-12. **A write task runs without the sandbox.** In `--mode accept-edits` its commands see the whole
-    filesystem, and the edit tools wrote a file outside the workspace without asking. The git
-    receipt covers the worktree only, so give write tasks only repositories whose content you
+12. **A write task's commands run without the sandbox.** In `--mode accept-edits` they see the
+    whole filesystem and reach the network. agy's edit tools are stricter: a write into the home
+    directory was denied, but one into `/tmp` went through without asking. The git receipt covers
+    the worktree only, so give write tasks only repositories whose content you
     trust.
 
 And two that are not agy's fault:

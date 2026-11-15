@@ -21,7 +21,7 @@
 # README.md has the full list of traps: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.3.0
+VERSION=0.3.1
 
 # Settings. The environment wins, then an optional config file of KEY=VALUE
 # lines, then the defaults. The file exists so that every caller on the machine
@@ -219,8 +219,8 @@ Where the run happens (exactly one):
 
 Permissions:
   -w               may write files (otherwise every file write is denied). A read task runs in agy's
-                   terminal sandbox; a write task runs outside it, and agy's edit tools can then
-                   write outside the worktree. The receipt covers the worktree only.
+                   terminal sandbox; a write task's commands run outside it, with the whole
+                   filesystem and the network. The receipt covers the worktree only.
   -a PREFIX        allow shell commands starting with PREFIX; repeat as needed.
                    A prefix, not a glob: -a "npm test" allows "npm test -- x"; "npm*" matches nothing.
                    No shell operators (&& ; | < >): agy always denies them headless. Another directory:

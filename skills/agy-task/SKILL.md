@@ -31,9 +31,9 @@ Work with an answer you can check, where the checking is cheaper than the doing:
 - Design decisions. A task with three reasonable approaches is a choice for the user, not
   something to offload.
 - Anything whose result you need to weigh with this conversation's context.
-- A write task on a repository whose content you do not trust. A write task runs outside agy's
-  sandbox, so the agent's edits are not confined to the worktree, and the receipt covers the
-  worktree only.
+- A write task on a repository whose content you do not trust. A write task's commands run outside
+  agy's sandbox, with the whole filesystem and the network, and the receipt covers the worktree
+  only.
 
 ## Writing the task
 

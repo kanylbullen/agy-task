@@ -162,7 +162,7 @@ Exit code `0` is the only finished outcome:
 | Code | Meaning |
 |---|---|
 | 0 | done, nothing denied |
-| 2 | bad invocation, a setup failure (fetch, worktree, project) or a pot over its budget; the agent never ran |
+| 2 | bad invocation, a setup failure (fetch, worktree, project), a pot over its budget or a used-up Antigravity limit; the agent never ran |
 | 3 | agy error, or no JSON answer |
 | 4 | something was denied, or the agent reported a `MISSING COMMAND`; the answer may be incomplete |
 | 5 | empty answer despite `"status":"SUCCESS"` |
@@ -283,6 +283,24 @@ account the whole Argon week came to roughly 3.6M tokens, so 700k is about a fif
 about two fifths. On a larger plan, scale the number with your limit. The budget counts agy-task's
 own runs, not other clients.
 
+**What Antigravity itself says.** `agy-task -q` prints the Models & Usage panel from the command
+line: what is left of each limit and when it refills. It reads `agy -p /usage`, which answers in a
+few seconds, spends no tokens and counts every client.
+
+```
+pot         window   left  refills
+gemini      weekly    81%  in 5d 0h (2026-11-21 12:18 UTC)
+gemini      5h        79%  in 32m (2026-11-16 12:28 UTC)
+claude+gpt  weekly    81%  in 4d 21h (2026-11-21 09:40 UTC)
+claude+gpt  5h       100%  in 5h 0m (2026-11-16 16:57 UTC)
+argon       weekly     2%  in 4d 21h (2026-11-21 09:22 UTC)
+```
+
+Every run reads it too. The first line of a run shows what is left of the pot's lowest limit, and a
+run on a pot whose limit is used up is refused with exit code 2, before anything is created. `-B`
+does not override that, because Antigravity would refuse the run anyway. If `/usage` does not
+answer, the run goes ahead with a warning.
+
 ## Twelve things `agy -p` will not tell you
 
 Each of these cost real time to find. Measured on **agy 1.5.9, November 2026**. agy moves fast, so
@@ -363,7 +381,8 @@ agy-task [options] -p "<task>"      (or -f FILE, or the task on stdin)
   -n NAME          job name; -t TIME time limit (default 30m); -s SCHEMA JSON schema for the answer
   -c ID            continue a conversation; -k keep a read task's worktree
   -P PROJECT       Antigravity project; -L no remote control
-  -u DAYS          usage per quota pot over the last DAYS days
+  -u DAYS          usage per quota pot over the last DAYS days, and the live quota
+  -q               what is left of each Antigravity limit now, and when it refills
   -B               run although the model's pot is over its weekly budget
 ```
 

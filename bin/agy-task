@@ -21,7 +21,7 @@
 # README.md has the full list of traps: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.5.1
+VERSION=0.6.0
 
 # Settings. The environment wins, then an optional config file of KEY=VALUE
 # lines, then the defaults. The file exists so that every caller on the machine
@@ -180,6 +180,50 @@ resolve_model() {
   die "no single model matches \"$m\".${hits:+ Candidates: $hits.} All models: $(cut -f1 "$MODELS_CACHE" | paste -sd ' ' -)"
 }
 
+# Antigravity's own quota, as its Models & Usage panel shows it. `agy -p /usage`
+# answers in about three seconds without spending tokens, and it counts every
+# client, not only agy-task's runs. Prints one line per limit:
+# pot<TAB>window<TAB>remaining fraction<TAB>refill time, or nothing when agy
+# cannot tell. A used-up limit may come without remaining_fraction (protobuf
+# leaves out zeros), so a missing value is 0.
+live_quota() {
+  (cd / && timeout 30 agy -p /usage --output-format json </dev/null 2>/dev/null) |
+    jq -r '.command.data.groups[]?.buckets[]? |
+      [(if (.id | startswith("gemini-argon")) then "argon"
+        elif (.id | startswith("gemini")) then "gemini"
+        elif (.id | startswith("3p")) then "claude+gpt" else .id end),
+       .window, (.remaining_fraction // 0), .reset_time] | @tsv' 2>/dev/null
+}
+
+# "4d 21h", "3h 5m" or "32m" until an ISO time.
+until_text() {
+  local t s
+  t=$(date -d "$1" +%s 2>/dev/null) || { echo "?"; return; }
+  s=$((t - $(date +%s)))
+  if [ $s -le 0 ]; then echo "now"
+  elif [ $s -ge 86400 ]; then echo "$((s / 86400))d $((s % 86400 / 3600))h"
+  elif [ $s -ge 3600 ]; then echo "$((s / 3600))h $((s % 3600 / 60))m"
+  else echo "$(((s + 59) / 60))m"
+  fi
+}
+
+pct() { awk -v f="$1" 'BEGIN { printf "%d", f * 100 + 0.5 }'; }
+
+quota_report() {
+  local q pot win frac reset
+  q=$(live_quota)
+  if [ -z "$q" ]; then
+    echo "Antigravity's quota could not be read (agy -p /usage gave no answer)."
+    return
+  fi
+  echo "Antigravity's quota now (agy /usage; every client counts, not only agy-task):"
+  printf '%-11s %-7s %5s  %s\n' pot window left refills
+  while IFS=$'\t' read -r pot win frac reset; do
+    printf '%-11s %-7s %4s%%  in %s (%s)\n' "$pot" "$win" "$(pct "$frac")" "$(until_text "$reset")" \
+      "$(date -u -d "$reset" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "$reset")"
+  done <<<"$q"
+}
+
 # Usage from the ledger, per pot and model, over the last N days.
 usage_report() {
   local days=$1 since
@@ -205,6 +249,8 @@ usage_report() {
     printf 'Budget: %s has used %s of %s tokens in the last 7 days%s\n' "$pot" "$(human "$used")" "$(human "$budget")" \
       "$([ "$used" -ge "$budget" ] && echo ' — over budget, so runs on it are refused without -B')"
   done
+  echo
+  quota_report
 }
 
 usage() {
@@ -240,7 +286,10 @@ Model:
   -B               run even though the model's quota pot is over its weekly budget. A budget is set
                    with AGY_TASK_BUDGET, e.g. "argon=700k": once agy-task has spent that many tokens
                    from the pot in seven days, further runs on it are refused. No budget by default.
-  -u DAYS          print usage per quota pot and model over the last DAYS days, and exit
+  -u DAYS          print usage per quota pot and model over the last DAYS days, and Antigravity's
+                   quota now, and exit
+  -q               print Antigravity's quota now (what is left of each limit, and when it
+                   refills), and exit
 
 Other:
   -n NAME          short job name [A-Za-z0-9._-], default a timestamp
@@ -257,7 +306,7 @@ Antigravity remote control (https://antigravity.google.com):
 
 Output: the answer and the git receipt on stdout; the full JSON and the prompt in
 $AGY_TASK_HOME/<run>/ (default ${XDG_CACHE_HOME:-~/.cache}/agy-task).
-Exit codes: 0 ok · 2 bad invocation or setup failure, the agent never ran · 3 agy error or no JSON
+Exit codes: 0 ok · 2 bad invocation, setup failure or no quota left, the agent never ran · 3 agy error or no JSON
             4 something was denied or missing · 5 empty answer · 6 a read task changed files
             7 wrong working directory · 124 time limit
 
@@ -276,9 +325,10 @@ dir="" repo="" base="" write=0 model="" name="" tmo=30m schema="" conv="" keep=0
 prompt="" prompt_file="" project="" live=1 over_budget=0 sandbox=0 p_given=0
 allow=("${DEFAULT_ALLOW[@]}")
 
-while getopts ":C:r:b:wSa:m:n:t:s:c:kp:f:P:LBu:Vh" opt; do
+while getopts ":C:r:b:wSa:m:n:t:s:c:kp:f:P:LBu:qVh" opt; do
   case $opt in
     u) usage_report "$OPTARG"; exit 0 ;;
+    q) quota_report; exit 0 ;;
     B) over_budget=1 ;;
     V) echo "agy-task $VERSION"; exit 0 ;;
     P) project=$OPTARG ;;
@@ -389,6 +439,23 @@ if [ -n "$budget" ]; then
   elif [ "$used" -ge "$budget" ]; then
     die "the $pot pot is over its weekly budget: agy-task has used $(human "$used") of $(human "$budget") tokens from it in the last 7 days. Pick a model on another pot (the default is $MODEL_DEFAULT), raise AGY_TASK_BUDGET, or pass -B to run this one anyway"
   fi
+fi
+
+# --- the live quota -------------------------------------------------------------
+# The budget above counts agy-task's own runs; Antigravity counts every client.
+# A pot with a limit used up fails the run anyway, so say so before anything is
+# created, and show what is left. The lowest limit of the pot is the one that stops a run.
+quota=$(live_quota) quota_note=""
+if [ -n "$quota" ]; then
+  low=$(awk -F'\t' -v p="$pot" '$1 == p' <<<"$quota" | sort -t$'\t' -k3,3g | head -n 1)
+  if [ -n "$low" ]; then
+    IFS=$'\t' read -r _ qwin qfrac qreset <<<"$low"
+    quota_note=", $(pct "$qfrac")% of its $qwin limit left"
+    awk -v f="$qfrac" 'BEGIN { exit !(f <= 0) }' &&
+      die "the $pot pot's $qwin limit is used up in Antigravity; it refills in $(until_text "$qreset"). Pick a model on another pot (the default is $MODEL_DEFAULT)"
+  fi
+else
+  echo "agy-task: warning: could not read Antigravity's quota (agy -p /usage); running without that check" >&2
 fi
 
 # --- where it runs --------------------------------------------------------------
@@ -563,7 +630,7 @@ args=(-p "$full" --output-format json --model "$model" --print-timeout "${secs}s
 [ -n "$conv" ] && args+=(--conversation "$conv")
 
 # --- run --------------------------------------------------------------------------
-echo "agy-task: $name · $model (pot $pot$budget_note) · $([ $write = 1 ] && echo write || echo read)$([ $write = 1 ] && [ $sandbox = 1 ] && echo ', sandboxed') · project $project$([ $live = 1 ] && echo ' · live on antigravity.google.com') · $dir" >&2
+echo "agy-task: $name · $model (pot $pot$budget_note$quota_note) · $([ $write = 1 ] && echo write || echo read)$([ $write = 1 ] && [ $sandbox = 1 ] && echo ', sandboxed') · project $project$([ $live = 1 ] && echo ' · live on antigravity.google.com') · $dir" >&2
 started=$(date +%s)
 (cd "$dir" && timeout -k 30 $((secs + 120)) agy "${args[@]}") \
   >"$logdir/stdout" 2>"$logdir/stderr" </dev/null

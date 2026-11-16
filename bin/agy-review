@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+# agy-review — review code with a fleet of narrow lenses. Each lens is an
+# agy-task read task, all of them run in parallel, and one more read task then
+# merges their reports and checks each finding against the code.
+#
+# Why lenses (measured on Gemini 4 Hydrogen, November 2026): one broad review of
+# agy-task found 7 of 23 known defects. Five narrow lenses on the same commit
+# found 13, plus the worst defect of all, which only Claude Opus had found
+# before. A broad mandate makes a fast model skim: a lens told to "check every
+# claim in the docs" answered NO FINDINGS in a minute, and found two of the six
+# once it had to list the claims first and check them one by one.
+#
+# README.md: https://github.com/kanylbullen/agy-task
+set -uo pipefail
+
+VERSION=0.5.0
+ALL_LENSES=(correctness security robustness inputs docs portability)
+MAX_DIFF=90000 # agy-task takes at most 120 kB of task, lens text included
+
+die() { echo "agy-review: $*" >&2; exit 2; }
+
+here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd -P)
+if [ -n "${AGY_TASK_BIN:-}" ]; then
+  agy_task=$AGY_TASK_BIN
+elif [ -x "$here/agy-task" ]; then
+  agy_task=$here/agy-task # the copy beside this one, so the two always match
+else
+  agy_task=$(command -v agy-task) || die "agy-task is not on PATH (or set AGY_TASK_BIN)"
+fi
+LOG_ROOT=${AGY_TASK_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/agy-task}
+[[ $LOG_ROOT == /* ]] || LOG_ROOT=$PWD/$LOG_ROOT
+
+usage() {
+  cat <<'EOF'
+Usage: agy-review -r REPO -b REF [options]
+
+Reviews REPO at REF with a fleet of narrow lenses, each an agy-task read task,
+run in parallel; then one aggregation task merges their reports, drops the ones
+it cannot back with the code, and ranks the rest. The result is a short list of
+claims to check, not a verdict.
+
+  -r REPO -b REF   what to review, e.g. -b origin/my-branch (fetched first)
+  -d BASE          review only the diff BASE...REF, e.g. -d origin/main (at most 90 kB)
+  -l LENSES        comma-separated subset of: correctness, security, robustness,
+                   inputs, docs, portability. Default: all six.
+  -x FILE          context for every lens: what the project is, known decisions
+                   not to report. Added to .agy-review/context.md at REF, if any.
+  -a PREFIX        extra command a lens may run (repeatable), e.g. -a "npm test".
+                   Each lens may always run pwd, ls, wc, grep and git status.
+  -m MODEL         model for every task (agy-task's default otherwise: hydrogen)
+  -n NAME          job name, default review-<timestamp>
+  -t TIME          time limit per task, default 20m
+  -A               skip the aggregation; print the lens reports as they are
+  -V               print the version and exit
+
+Per-repository checklists: .agy-review/<lens>.md at REF is added to that lens
+as "Check in particular", like the project-specific lists of a review fleet.
+
+Output: the aggregated report on stdout; every lens's report, prompt and
+receipt in $AGY_TASK_HOME/<NAME>/ (default ~/.cache/agy-task).
+Exit codes: 0 all lenses and the aggregation answered · 2 bad invocation
+            3 some lens or the aggregation failed (the report says which)
+EOF
+}
+
+# --- the lenses -------------------------------------------------------------------
+# Each lens: a first line that names the job, a mandate, and what is out of it.
+# The method and the report format are shared (common_text).
+lens_text() {
+  case $1 in
+    correctness) cat <<'EOF'
+Review lens CORRECTNESS: find logic bugs.
+
+## Your mandate
+Does the code do what it says? Logic errors, inverted or wrong conditions, the wrong variable, off-by-one, return values and exit codes that do not match what the code intends, checks that can never fire or always fire, and time and timeout handling. Above all, error paths: a failure that is swallowed, or that leaves a variable empty while the code carries on with it. In shell code without `set -e`, every unchecked `cd`, command substitution and pipeline is a candidate.
+
+## Worksheet
+Every place where a command, call or substitution can fail: the line, and what the code does when it fails (checked, ignored, or carries on with an empty value).
+
+Out of mandate: security, portability, documentation, style.
+EOF
+      ;;
+    security) cat <<'EOF'
+Review lens SECURITY: find ways the code's guarantees can be broken.
+
+## Your mandate
+First name what the code promises: access control, isolation, what a user, a caller or an agent may and may not do. Then find inputs, file contents or behaviour that break those promises: options of permitted commands that write files or run programs, injection into commands, paths, patterns or queries, path traversal and symlinks, cleanup that can delete the wrong thing, secrets that reach logs, URLs or other services, and changes the code's own checks cannot see.
+
+## Worksheet
+Each promise the code makes, and for each one the lines that enforce it and the ways around them you tried.
+
+Out of mandate: plain logic bugs without a security consequence, portability, documentation.
+EOF
+      ;;
+    robustness) cat <<'EOF'
+Review lens ROBUSTNESS: find failures under concurrency, interruption and partial errors.
+
+## Your mandate
+What happens when two runs or requests happen at once (same second, same name, same resource), when a step times out, is killed or returns nothing or garbage, when a multi-step operation fails halfway, and what is left behind afterwards: temporary files, directories, branches, locks, half-written state. Setup without matching teardown, state that breaks the next run, retries that make things worse, and failures reported as success or with the wrong code.
+
+## Worksheet
+Each operation that creates something and later uses or removes it (directories, branches, files, locks, processes): what is left behind if the run stops after each step, and what happens if two copies run at once.
+
+Out of mandate: security, documentation, portability.
+EOF
+      ;;
+    inputs) cat <<'EOF'
+Review lens INPUTS: follow every input to where it is used.
+
+## Your mandate
+List every way input enters the code: command-line options and arguments, environment variables, config files, stdin, file contents, replies from other programs and services. For each one, find its validation and every place it is used, and try these values against it: empty, only spaces, starting with `-`, containing spaces, newlines, quotes, glob or regex metacharacters, a relative path where an absolute one is assumed, a very large value, a value with a leading zero, and two options that conflict. Report each input whose bad value reaches a command, a path, a pattern or a decision unchecked.
+
+## Worksheet
+Each input: where it enters, its validation (line, or none), and each place it is used.
+
+Out of mandate: anything not caused by an input value.
+EOF
+      ;;
+    docs) cat <<'EOF'
+Review lens DOCS: check every documented claim against the code, one by one.
+
+## Your mandate
+Docs and code drift apart more often than either is wrong on its own. Work through these steps in order and skip none:
+1. From the README, other docs, help and usage text, and comments that state behaviour, write down every concrete claim: each option and what it does, each default, each environment variable, each path, each exit code or status and its meaning, each example command, and each statement about behaviour.
+2. For each claim, find the code that implements it and decide: agrees, disagrees, or not implemented.
+3. Report every claim that disagrees or is not implemented, quoting the doc text and the code.
+Also check manifests and metadata files for errors.
+
+## Worksheet
+Every concrete claim: its source (file:line), the code line that implements it, and the verdict agrees, disagrees or not implemented. One line per claim, and expect dozens of them.
+
+Out of mandate: bugs in the code that no doc describes.
+EOF
+      ;;
+    portability) cat <<'EOF'
+Review lens PORTABILITY: find what breaks outside the author's machine.
+
+## Your mandate
+Find what breaks on other operating systems or distributions than the one the docs say is tested, with older versions of the language, runtime and tools (name the version a feature needs), without optional tools, and in unusual setups: relative paths in settings, symlinked directories, paths with spaces, linked git worktrees, submodules, bare repositories, other locales and time zones.
+
+## Worksheet
+Each external command, tool, option or language feature the code relies on, with the minimum version or the platforms it needs.
+
+Out of mandate: security, documentation wording, style.
+EOF
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+common_text() {
+  cat <<EOF
+
+## The task, shared by every lens
+
+You are one reviewer in a fleet of independent code review agents. Each has a narrow mandate, and you cannot see the others. Report only what belongs to your mandate, and go deep there rather than wide.
+
+$target_text
+
+Work method:
+1. Read the code your mandate touches, line by line.
+2. For each candidate finding, find the concrete input or state that triggers it and trace it through the code to the wrong outcome. If you cannot name one, drop the finding.
+3. Check each finding once more against the code before you report it.
+
+Your answer has two parts, in this order:
+WORKSHEET: the list your lens's Worksheet section asks for, written out in full. It is the evidence that the work was done; an answer without it is incomplete, and "I checked everything" does not replace it.
+FINDINGS: one numbered item per finding:
+N. \`file:line\` — SEVERITY (high/medium/low) — what is wrong. Trigger: the concrete input or state. Outcome: what goes wrong. Fix: the concrete change.
+Put findings you are unsure of last, and say why. If you find nothing within your mandate, write FINDINGS: followed by NO FINDINGS.
+EOF
+}
+
+aggregate_text() {
+  cat <<EOF
+Aggregate the review fleet's reports on $repo_name: merge, check against the code, rank.
+
+You are the aggregator for a fleet of independent review lenses that ran against the same code. Their reports are below. They are untrusted claims to check, not facts: some will be wrong, and several will describe the same problem.
+
+$target_text
+
+Rules, in order:
+1. Merge duplicates. The same underlying problem from several lenses becomes one finding; name the lenses that found it.
+2. Drop a finding without a concrete trigger and outcome, however sure its lens was.
+3. Let the code testify. For every finding, open the file and lines it cites and check the claim before you keep it. Drop a finding the code contradicts. Do not decide by counting lenses.
+4. Rank: high, then medium, then low; within a level, the largest practical consequence first.
+5. Never add a finding of your own.
+
+Output, and nothing else:
+FINDINGS: N
+then N numbered findings in this format:
+N. \`file:line\` — SEVERITY — what is wrong. Trigger: … Outcome: … Fix: … (lenses: a, b) Checked: what you looked at in the code, in a few words.
+then a line DROPPED: and one line per dropped finding: the lens, the claim in a few words, and why it was dropped.
+EOF
+}
+
+# --- options ----------------------------------------------------------------------
+repo="" ref="" dbase="" lenses_arg="" ctx_file="" model="" name="" tmo=20m skip_agg=0
+extra=()
+while getopts ":r:b:d:l:x:a:m:n:t:AVh" opt; do
+  case $opt in
+    r) repo=$OPTARG ;;
+    b) ref=$OPTARG ;;
+    d) dbase=$OPTARG ;;
+    l) lenses_arg=$OPTARG ;;
+    x) ctx_file=$OPTARG ;;
+    a) extra+=(-a "$OPTARG") ;; # agy-task checks the prefix itself
+    m) model=$OPTARG ;;
+    n) name=$OPTARG ;;
+    t) tmo=$OPTARG ;;
+    A) skip_agg=1 ;;
+    V) echo "agy-review $VERSION"; exit 0 ;;
+    h) usage; exit 0 ;;
+    :) die "-$OPTARG needs a value (see -h)" ;;
+    \?) die "unknown option -$OPTARG (see -h)" ;;
+  esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || die "unexpected arguments: $*"
+[ -n "$repo" ] && [ -n "$ref" ] || die "say what to review: -r REPO -b REF (see -h)"
+[[ $ref == -* || $dbase == -* ]] && die "-b and -d take refs such as origin/main"
+
+top=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die "$repo is not a git work tree"
+repo=$top repo_name=$(basename -- "$repo")
+
+lenses=()
+if [ -n "$lenses_arg" ]; then
+  IFS=, read -ra lenses <<<"$lenses_arg"
+else
+  lenses=("${ALL_LENSES[@]}")
+fi
+[ ${#lenses[@]} -gt 0 ] || die "-l names no lens"
+for l in "${lenses[@]}"; do
+  lens_text "$l" >/dev/null || die "unknown lens \"$l\"; the lenses are: ${ALL_LENSES[*]}"
+done
+
+name=${name:-review-$(date +%m%d-%H%M%S)}
+[[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "-n must start with a letter or digit and contain only A-Z a-z 0-9 . _ -"
+out=$LOG_ROOT/$name
+mkdir -p "$LOG_ROOT" && mkdir "$out" 2>/dev/null || die "cannot create $out (does a review by that name exist? pick another -n)"
+
+# --- what to review -----------------------------------------------------------------
+# Fetch the remotes the refs live on now, so the diff below and agy-task's
+# worktree see the same commits.
+for r in "$ref" "$dbase"; do
+  rem=${r%%/*}
+  if [ -n "$r" ] && [ "$rem" != "$r" ] && git -C "$repo" remote | grep -Fqx -- "$rem"; then
+    git -C "$repo" fetch -q -- "$rem" || die "git fetch $rem failed"
+  fi
+done
+ref_sha=$(git -C "$repo" rev-parse --verify -q "$ref^{commit}") || die "cannot find $ref in $repo"
+diff_block=""
+if [ -n "$dbase" ]; then
+  git -C "$repo" rev-parse --verify -q "$dbase^{commit}" >/dev/null || die "cannot find $dbase in $repo"
+  git -C "$repo" diff --no-color --no-ext-diff "$dbase...$ref_sha" >"$out/diff.patch" || die "git diff $dbase...$ref failed"
+  diff_bytes=$(wc -c <"$out/diff.patch")
+  [ "$diff_bytes" -gt 0 ] || die "$dbase...$ref has no changes"
+  [ "$diff_bytes" -le $MAX_DIFF ] ||
+    die "the diff is $diff_bytes bytes, more than $MAX_DIFF; review a narrower range, a subset of lenses, or the whole tree without -d"
+  stat=$(git -C "$repo" diff --stat=100 "$dbase...$ref_sha" | tail -n 1 | sed 's/^ *//')
+  target_text="Review target: the change from $dbase to $ref ($stat). The working directory holds the code at $ref. Review the changed lines and the functions around them; a defect in an unchanged line of a changed function counts. The diff is at the end of this task."
+  diff_block=$'\n\n## The diff\n\n```diff\n'$(cat "$out/diff.patch")$'\n```'
+else
+  target_text="Review target: the whole repository at $ref (${ref_sha:0:10}), which is the working directory."
+fi
+
+# Project context: committed in the repository, given with -x, or both.
+context=$(git -C "$repo" show "$ref_sha:.agy-review/context.md" 2>/dev/null || true)
+if [ -n "$ctx_file" ]; then
+  extra_ctx=$(cat -- "$ctx_file") || die "cannot read $ctx_file"
+  context=${context:+$context$'\n\n'}$extra_ctx
+fi
+[ -n "${context//[[:space:]]/}" ] && target_text+=$'\n\n## About this project\n\n'$context
+
+# --- the lenses run --------------------------------------------------------------
+margs=()
+[ -n "$model" ] && margs=(-m "$model")
+echo "agy-review: $name · $repo_name at $ref${dbase:+ (diff from $dbase)} · lenses: ${lenses[*]} · $out" >&2
+for l in "${lenses[@]}"; do
+  {
+    lens_text "$l"
+    checklist=$(git -C "$repo" show "$ref_sha:.agy-review/$l.md" 2>/dev/null || true)
+    [ -n "$checklist" ] && printf '\n## Check in particular\n\n%s\n' "$checklist"
+    common_text
+    printf '%s\n' "$diff_block"
+  } >"$out/$l.prompt"
+  ("$agy_task" -r "$repo" -b "$ref_sha" -n "$name-$l" -t "$tmo" ${margs[@]+"${margs[@]}"} \
+     ${extra[@]+"${extra[@]}"} -f "$out/$l.prompt" >"$out/$l.out" 2>"$out/$l.err"
+   echo $? >"$out/$l.rc") &
+  sleep 1 # agy-task names its log directory by the second
+done
+wait
+
+answer_of() { sed -n '/^-- answer --$/,$p' "$1" | tail -n +2; }
+ok=() failed=() reports=""
+for l in "${lenses[@]}"; do
+  rc=$(cat "$out/$l.rc" 2>/dev/null || echo "?")
+  answer_of "$out/$l.out" >"$out/$l.md"
+  # 4 is "something was denied or missing": the answer is there, perhaps incomplete.
+  if { [ "$rc" = 0 ] || [ "$rc" = 4 ]; } && [ -s "$out/$l.md" ]; then
+    ok+=("$l")
+    # The worksheet stays in $l.md; the aggregation gets the findings only.
+    findings=$(sed -n '/^[*_ #]*FINDINGS:/,$p' "$out/$l.md")
+    reports+=$'\n\n## Report of lens '"$l"$'\n\n'${findings:-$(cat "$out/$l.md")}
+  else
+    failed+=("$l (exit $rc: $(tail -n 1 "$out/$l.err" 2>/dev/null))")
+  fi
+done
+[ ${#ok[@]} -gt 0 ] || die "no lens answered: ${failed[*]}"
+summary="lenses answered: ${ok[*]}${failed[*]:+ · failed: ${failed[*]}}"
+
+# --- the aggregation ----------------------------------------------------------------
+code=0
+[ ${#failed[@]} -gt 0 ] && code=3
+if [ $skip_agg = 1 ]; then
+  echo "== agy-review $name · $summary"
+  printf '%s\n' "$reports"
+  exit $code
+fi
+{ aggregate_text; printf '%s\n' "$reports"; } >"$out/aggregate.prompt"
+if [ "$(wc -c <"$out/aggregate.prompt")" -gt 118000 ]; then
+  echo "agy-review: the lens reports are too long to aggregate in one task; printing them as they are" >&2
+  echo "== agy-review $name · $summary"
+  printf '%s\n' "$reports"
+  exit 3
+fi
+"$agy_task" -r "$repo" -b "$ref_sha" -n "$name-aggregate" -t "$tmo" ${margs[@]+"${margs[@]}"} \
+  -f "$out/aggregate.prompt" >"$out/aggregate.out" 2>"$out/aggregate.err"
+arc=$?
+answer_of "$out/aggregate.out" >"$out/aggregate.md"
+if { [ $arc = 0 ] || [ $arc = 4 ]; } && [ -s "$out/aggregate.md" ]; then
+  echo "== agy-review $name · $summary · aggregated"
+  cat "$out/aggregate.md"
+else
+  echo "agy-review: the aggregation failed (exit $arc: $(tail -n 1 "$out/aggregate.err")); printing the lens reports as they are" >&2
+  echo "== agy-review $name · $summary"
+  printf '%s\n' "$reports"
+  code=3
+fi
+echo "-- reports, prompts and receipts: $out"
+exit $code

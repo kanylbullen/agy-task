@@ -1,6 +1,6 @@
 ---
 name: agy-task
-description: Offload a bounded, mechanical coding task to the Antigravity CLI (agy), headless in its own git worktree, and read the result from git. Use when the work has an answer you can check and would otherwise spend this session's tokens — searching a codebase, asking one question of many files, reading logs or CI output, running a test suite and reporting, a small mechanical change with a test command. Not for secrets, production data, security-critical decisions or design choices.
+description: Offload a bounded, mechanical coding task, or a multi-lens code review, to the Antigravity CLI (agy), headless in its own git worktree, and read the result from git. Use when the work has an answer you can check and would otherwise spend this session's tokens — searching a codebase, asking one question of many files, reading logs or CI output, running a test suite and reporting, a small mechanical change with a test command. Not for secrets, production data, security-critical decisions or design choices.
 ---
 
 # Offloading work to Antigravity with agy-task
@@ -102,3 +102,27 @@ A half-done change stays in the worktree even when the run failed — check befo
 the same branch. Clean up with the command on the receipt's `clean up:` line.
 
 `${CLAUDE_PLUGIN_ROOT}/bin/agy-task -u 7` shows the last week's usage per quota pot.
+
+## Reviewing code
+
+For a review, use `agy-review`, not one broad agy-task: it runs six narrow lenses in parallel and
+aggregates them, and on a measured benchmark it found about twice as many real defects.
+
+```sh
+# A pull request: the diff from the base, read in the context of the branch
+${CLAUDE_PLUGIN_ROOT}/bin/agy-review -r /abs/path/to/repo -b origin/the-branch -d origin/main -n review-pr-123
+
+# The whole tree
+${CLAUDE_PLUGIN_ROOT}/bin/agy-review -r /abs/path/to/repo -b origin/main
+```
+
+- It takes about five minutes; run it in the background.
+- Pass what the lenses cannot know with `-x FILE`: what the project is, decisions not to report,
+  the trap you already suspect. `-l` picks lenses, `-a` adds a command such as a test runner.
+- The diff is limited to 90 kB. For a bigger one, review a narrower range or pick lenses.
+- **The output is a list of claims, not a verdict.** Check every finding you report against the
+  code. The aggregation already dropped the ones it could not back, and its `DROPPED:` list says
+  why. A "no findings" from the docs lens means little: on Hydrogen it marked claims as agreeing
+  that the code contradicts.
+- Exit 0: every lens and the aggregation answered. Exit 3: something failed, and the report says
+  which. Each lens's full report and worksheet are in the directory printed at the end.

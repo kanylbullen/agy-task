@@ -99,9 +99,10 @@ The skill is about 100 lines. Read it before you install the plugin.
 ### From your shell
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kanylbullen/agy-task/main/bin/agy-task \
-  -o ~/.local/bin/agy-task
-chmod +x ~/.local/bin/agy-task
+for f in agy-task agy-review; do
+  curl -fsSL "https://raw.githubusercontent.com/kanylbullen/agy-task/main/bin/$f" -o ~/.local/bin/$f
+  chmod +x ~/.local/bin/$f
+done
 ```
 
 **Start with a question.** In any git repository:
@@ -217,6 +218,39 @@ Later the same review of the same commit ran on Claude Opus 5.5 through Antigrav
 84k tokens. It found fewer of the known bugs than Argon, and seven that neither Gemini model had
 found. One was the worst so far: two default commands let a read task write files and run
 programs (`git log --output=FILE`, `rg --pre PROGRAM`). Version 0.3.0 fixes them.
+
+### Reviews: a fleet of narrow lenses
+
+One broad review is where Hydrogen is weakest: told to find everything, it skims. `agy-review`
+borrows the shape of a review fleet instead. Six lenses (correctness, security, robustness,
+inputs, docs, portability) each get a narrow mandate and run in parallel as read tasks. Each must
+write out a worksheet before its findings, such as every unchecked failure point or every input
+and where it is used. One more task then merges the reports, opens the cited lines, drops what the
+code does not back and ranks the rest.
+
+```sh
+agy-review -r ~/src/myapp -b origin/my-branch -d origin/main   # a pull request's diff
+agy-review -r ~/src/myapp -b origin/main                        # the whole tree
+```
+
+On the same commit and against the same 23 known defects:
+
+| Review on Hydrogen | Known defects found | Also found | Time | Tokens |
+|---|---|---|---|---|
+| One broad task | 7 | – | 105 s | 55k |
+| Five lenses, no worksheets, counted by hand | 13 | the read-task hole above, and more | ~2 min | 255k |
+| `agy-review`: six lenses with worksheets, aggregated | about 12 | the hole, and some 15 more real defects in 33 findings | 4.5 min | 448k |
+
+That is about Opus's level on this code for roughly 1 % of the Hydrogen week, and it touches
+neither Argon's quota nor Claude's. Two caveats. Runs vary by a few findings either way. And the
+docs lens is unreliable on Hydrogen: its worksheet marked claims "agrees" that the code
+contradicts, so a docs "no findings" means little. The result is a list of claims to check, not a
+verdict.
+
+A repository can add its own checklists, like the project-specific lists of a review fleet:
+`.agy-review/context.md` goes to every lens (what the project is, known decisions not to report),
+and `.agy-review/<lens>.md` to that lens as "Check in particular". `-x FILE` adds context without
+committing it.
 
 ### Keep the scarce model for the jobs that need it
 

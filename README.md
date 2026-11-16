@@ -13,7 +13,7 @@
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue">
   <img alt="Tested with agy 1.5.9" src="https://img.shields.io/badge/tested%20with-agy%201.5.9-4285F4">
   <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-D97757">
-  <img alt="One file of bash" src="https://img.shields.io/badge/one%20file-bash-2ea44f">
+  <img alt="Two scripts of bash" src="https://img.shields.io/badge/two%20scripts-bash-2ea44f">
 </p>
 
 <p align="center">
@@ -38,9 +38,8 @@ and test runs stop spending the tokens you want Claude to think with. Over one d
 Hydrogen cost about 0.25 % of its weekly quota per 100k tokens.
 
 **You get a second opinion from another lab.** A different model misses different things. Claude
-wrote agy-task, and two Gemini models then reviewed it through agy-task. Fifteen of their findings
-held up when checked against the code, and all fifteen are fixed. A third review, by Claude Opus
-through the same tool, found the worst bug of the lot, which neither Gemini model had seen.
+wrote agy-task, Gemini and Claude models reviewed it through agy-task, and each found bugs the
+others had missed ([numbers](#numbers)).
 
 **git keeps both honest.** An agent's "done" is a claim, whichever lab trained it. This is a real
 answer from `agy -p`, after a run that used 129k tokens (other fields left out):
@@ -64,14 +63,26 @@ commands it may run by default can neither write a file nor start a program. A w
 commands run outside that sandbox, with the whole filesystem and the network, and the git receipt
 covers the worktree only ([trap 12](#twelve-things-agy--p-will-not-tell-you)).
 
-**You can read it before you run it.** One file, about 500 lines of bash, built on git, jq and
-standard Linux tools.
+**You can read it before you run it.** Two bash scripts, built on git, jq and standard Linux
+tools: `agy-task` (about 750 lines) runs one task, and `agy-review` (about 340) runs a review as
+several agy-task runs.
 
 > [!WARNING]
 > **Your code is sent to Google.** Everything the agent reads goes to the model you pick. Do not
 > point it at secrets, `.env` files, production data or anything you would not paste into a chat.
 > A fresh worktree has no untracked files, which helps. It does not make an unsuitable repository
 > suitable.
+
+**Contents:** [Try it](#try-it-in-a-minute) ·
+[A handover](#what-a-handover-looks-like) ·
+[Exit codes](#when-something-goes-wrong-it-says-so) ·
+[The workflow](#the-workflow-stop-by-stop) ·
+[Numbers](#numbers) ·
+[Reviews](#reviews-a-fleet-of-narrow-lenses) ·
+[Quotas and budgets](#quotas-and-budgets) ·
+[The twelve traps](#twelve-things-agy--p-will-not-tell-you) ·
+[Reference](#reference) ·
+[FAQ](#faq)
 
 ## Try it in a minute
 
@@ -94,16 +105,27 @@ and a short [skill](skills/agy-task/SKILL.md) that teaches Claude:
   found, the trap, the test command and what done looks like
 - **what to trust:** the exit code and the git receipt, read before anything is reported as done
 
-The skill is about 100 lines. Read it before you install the plugin.
+The skill is about 130 lines. Read it before you install the plugin.
+
+`/plugin marketplace update agy-task` fetches a newer version, and
+`/plugin uninstall agy-task@agy-task` removes it.
 
 ### From your shell
 
 ```sh
 for f in agy-task agy-review; do
-  curl -fsSL "https://raw.githubusercontent.com/kanylbullen/agy-task/main/bin/$f" -o ~/.local/bin/$f
-  chmod +x ~/.local/bin/$f
+  curl -fsSL "https://raw.githubusercontent.com/kanylbullen/agy-task/main/bin/$f" -o ~/.local/bin/$f.new &&
+    chmod +x ~/.local/bin/$f.new && mv ~/.local/bin/$f.new ~/.local/bin/$f
 done
 ```
+
+The same loop updates an installed copy. It downloads beside the old file and moves the new one
+over it, so a job that is running keeps reading the version it started with
+([why](#twelve-things-agy--p-will-not-tell-you)). To uninstall, delete the two files;
+`~/.cache/agy-task` and `~/.config/agy-task` hold the logs, the ledger and your settings.
+
+**Check what you have left.** `agy-task -q` shows what remains of each Antigravity limit and when it
+refills, without spending tokens.
 
 **Start with a question.** In any git repository:
 
@@ -219,7 +241,7 @@ Later the same review of the same commit ran on Claude Opus 5.5 through Antigrav
 found. One was the worst so far: two default commands let a read task write files and run
 programs (`git log --output=FILE`, `rg --pre PROGRAM`). Version 0.3.0 fixes them.
 
-### Reviews: a fleet of narrow lenses
+## Reviews: a fleet of narrow lenses
 
 One broad review is where Hydrogen is weakest: told to find everything, it skims. `agy-review`
 borrows the shape of a review fleet instead. Six lenses (correctness, security, robustness,
@@ -233,7 +255,8 @@ agy-review -r ~/src/myapp -b origin/my-branch -d origin/main   # a pull request'
 agy-review -r ~/src/myapp -b origin/main                        # the whole tree
 ```
 
-On the same commit and against the same 23 known defects:
+On that same commit, scored against the 23 defects in it that all the reviews together found and
+that were then fixed:
 
 | Review on Hydrogen | Known defects found | Also found | Time | Tokens |
 |---|---|---|---|---|
@@ -252,9 +275,9 @@ A repository can add its own checklists, like the project-specific lists of a re
 and `.agy-review/<lens>.md` to that lens as "Check in particular". `-x FILE` adds context without
 committing it.
 
-### Keep the scarce model for the jobs that need it
+## Quotas and budgets
 
-The Models & Usage panel in Antigravity shows separate quota pots, and they empty at very different
+Keep the scarce model for the jobs that need it. The Models & Usage panel in Antigravity shows separate quota pots, and they empty at very different
 speeds. On a Google AI Pro plan in November 2026 there were three: Gemini 4 Argon (weekly), Claude
 and GPT (weekly plus five-hour), and the other Gemini models, Hydrogen and Flash (weekly plus
 five-hour). Measured over one day on that account:
@@ -388,6 +411,25 @@ agy-task [options] -p "<task>"      (or -f FILE, or the task on stdin)
 
 `agy-task -h` has the rest.
 
+```
+agy-review -r REPO -b REF [options]
+
+  -r REPO -b REF   what to review, e.g. -b origin/my-branch (fetched first)
+  -d BASE          review only the diff BASE...REF, e.g. -d origin/main (at most 90 kB)
+  -l LENSES        comma-separated subset of correctness, security, robustness,
+                   inputs, docs, portability (default: all six)
+  -x FILE          context for every lens, added to .agy-review/context.md at REF
+  -a PREFIX        extra command a lens may run (repeatable), e.g. -a "npm test"
+  -m MODEL         model for every task (default: agy-task's, hydrogen)
+  -n NAME          job name; -t TIME time limit per task (default 20m)
+  -A               skip the aggregation and print the lens reports as they are
+  -V               print the version
+```
+
+agy-review prints the aggregated report and leaves every lens's report, prompt and receipt in
+`~/.cache/agy-task/<NAME>/`. It exits 0 when every lens and the aggregation answered, 2 on a bad
+invocation, and 3 when some task failed; the report says which.
+
 **Requirements.** `bash`, git 2.17 or later, `jq`, `flock`, GNU coreutils 8.28 or later (for
 `timeout -k`, and for the `env -C` the agent is told to use), `pgrep` (procps) and `agy`, signed
 in. Tested on Linux (Debian) with agy 1.5.9. BusyBox systems such as Alpine lack `env -C`. macOS
@@ -434,7 +476,7 @@ the worktree does not show up there.
 **Which model should I use?** Hydrogen, the default, for nearly everything. Switch with `-m`,
 using a short name such as `argon` or `flash-high`, or any id from `agy models`. Argon is for a
 job that has already failed on Hydrogen. Its quota is small, so
-[give it a budget](#keep-the-scarce-model-for-the-jobs-that-need-it).
+[give it a budget](#quotas-and-budgets).
 
 **Does it work on macOS?** Untested. The script relies on `flock` and GNU `timeout`, which need
 Homebrew there. Reports are welcome.

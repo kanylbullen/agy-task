@@ -21,7 +21,7 @@
 # README.md has the full list of traps: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.5.0
+VERSION=0.5.1
 
 # Settings. The environment wins, then an optional config file of KEY=VALUE
 # lines, then the defaults. The file exists so that every caller on the machine
@@ -183,7 +183,7 @@ resolve_model() {
 # Usage from the ledger, per pot and model, over the last N days.
 usage_report() {
   local days=$1 since
-  [[ $days =~ ^[0-9]+$ ]] || die "-u takes a number of days, e.g. -u 7"
+  [[ $days =~ ^[0-9]{1,5}$ ]] || die "-u takes a number of days, e.g. -u 7"
   [ -s "$LEDGER" ] || { echo "no usage logged yet ($LEDGER does not exist)"; return; }
   since=$(($(date +%s) - 10#$days * 86400))
   echo "Usage over the last $days days (agy-task runs only, from $LEDGER):"
@@ -273,7 +273,7 @@ EOF
 }
 
 dir="" repo="" base="" write=0 model="" name="" tmo=30m schema="" conv="" keep=0
-prompt="" prompt_file="" project="" live=1 over_budget=0 sandbox=0
+prompt="" prompt_file="" project="" live=1 over_budget=0 sandbox=0 p_given=0
 allow=("${DEFAULT_ALLOW[@]}")
 
 while getopts ":C:r:b:wSa:m:n:t:s:c:kp:f:P:LBu:Vh" opt; do
@@ -301,7 +301,7 @@ while getopts ":C:r:b:wSa:m:n:t:s:c:kp:f:P:LBu:Vh" opt; do
     c) conv=$OPTARG ;;
     k) keep=1 ;;
     S) sandbox=1 ;;
-    p) prompt=$OPTARG ;;
+    p) prompt=$OPTARG p_given=1 ;;
     f) prompt_file=$OPTARG ;;
     h) usage; exit 0 ;;
     :) die "-$OPTARG needs a value (see -h)" ;;
@@ -311,7 +311,13 @@ done
 shift $((OPTIND - 1))
 [ $# -eq 0 ] || die "unexpected arguments: $* (the task goes in -p, -f or stdin)"
 
-[ -n "$prompt" ] && [ -n "$prompt_file" ] && die "-p and -f both give the task; use one of them"
+# By whether the flag was given, not by its value: -p "" -f FILE is a conflict too.
+[ $p_given = 1 ] && [ -n "$prompt_file" ] && die "-p and -f both give the task; use one of them"
+# The project name lands in a column of the tab-separated ledger.
+if [ -n "$project" ]; then
+  [[ $project =~ [[:cntrl:]] ]] && die "-P must not contain tabs, newlines or other control characters"
+  [ -n "${project//[[:space:]]/}" ] || die "-P needs a name, not only spaces"
+fi
 if [ -n "$prompt_file" ]; then
   prompt=$(cat -- "$prompt_file") || die "cannot read $prompt_file"
 elif [ -z "$prompt" ] && [ ! -t 0 ]; then
@@ -321,9 +327,10 @@ fi
 # agy takes the task as one command-line argument, and Linux caps a single
 # argument at 128 KiB (MAX_ARG_STRLEN): past that the exec fails with E2BIG.
 # The limit leaves room for the preamble.
-prompt_bytes=$(printf %s "$prompt" | wc -c)
+# The allowed commands are listed in the preamble too, so they count.
+prompt_bytes=$(( $(printf %s "$prompt" | wc -c) + $(printf '"%s", ' "${allow[@]}" | wc -c) ))
 [ "$prompt_bytes" -le 120000 ] ||
-  die "the task is $prompt_bytes bytes, and agy takes it as one command-line argument, which Linux caps at 128 KiB. Put the bulk in a file the agent can read (committed at the ref, for -r) and point the task at it"
+  die "the task and the allowed commands are $prompt_bytes bytes, and agy takes it as one command-line argument, which Linux caps at 128 KiB. Put the bulk in a file the agent can read (committed at the ref, for -r) and point the task at it"
 
 [ -n "$repo" ] && [ -n "$dir" ] && die "-r and -C are mutually exclusive"
 [ -z "$repo" ] && [ -z "$dir" ] && die "say where: -r REPO -b REF (worktree) or -C DIR"
@@ -351,7 +358,7 @@ if [ -n "$schema" ] && [ -f "$schema" ]; then
   schema=$(cd -- "$(dirname -- "$schema")" && pwd -P)/$(basename -- "$schema")
 fi
 
-[[ $tmo =~ ^([0-9]+)([smh]?)$ ]] || die "-t should be e.g. 20m, 1h or 300s"
+[[ $tmo =~ ^([0-9]{1,6})([smh]?)$ ]] || die "-t should be e.g. 20m, 1h or 300s"
 case ${BASH_REMATCH[2]} in
   h) secs=$((10#${BASH_REMATCH[1]} * 3600)) ;;
   m) secs=$((10#${BASH_REMATCH[1]} * 60)) ;;

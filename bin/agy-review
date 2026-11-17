@@ -13,7 +13,7 @@
 # README.md: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.7.0
+VERSION=0.7.1
 ALL_LENSES=(correctness security robustness inputs docs portability)
 MAX_DIFF=90000 # agy-task takes at most 120 kB of task, lens text included
 TASK_TOKENS=75000 # tokens per task when the ledger has no earlier review to go by
@@ -50,8 +50,10 @@ claims to check, not a verdict.
                    Each lens may always run pwd, ls, wc, grep and git status.
   -m MODEL         model for every task (agy-task's default otherwise: hydrogen)
   -M LENS=MODEL,…  a model for some lenses, repeatable; the others keep -m.
-                   -M claude: opus on correctness, security, robustness and the
-                   aggregation, sonnet on inputs, docs and portability
+                   -M claude: sonnet on every lens and the aggregation.
+                   -M claude-opus: opus on correctness, security, robustness and
+                   the aggregation, sonnet on the rest. On Google AI Pro, Opus
+                   empties the Claude pot's five-hour limit within one review.
   -g MODEL         model for the aggregation, which checks the findings against
                    the code (default: -m)
   -n NAME          job name, default review-<timestamp>
@@ -247,17 +249,26 @@ for l in "${lenses[@]}"; do
   lens_text "$l" >/dev/null || die "unknown lens \"$l\"; the lenses are: ${ALL_LENSES[*]}"
 done
 
-# Models per lens: -M LENS=MODEL pairs, or the preset "claude". Later ones win.
+# Models per lens: -M LENS=MODEL pairs, or a preset. Later ones win.
+#   claude       sonnet everywhere. On Google AI Pro (measured 2026-11-17) a review with
+#                four Opus tasks emptied the Claude pot's five-hour limit after about 560k
+#                tokens, and four lenses died on 429 with their tokens already spent.
+#   claude-opus  opus where judgement matters, sonnet on the checklists; for larger plans.
 preset_agg=""
 for spec in ${lens_specs[@]+"${lens_specs[@]}"}; do
-  if [ "$spec" = claude ]; then
-    lens_model[correctness]=opus lens_model[security]=opus lens_model[robustness]=opus
-    lens_model[inputs]=sonnet lens_model[docs]=sonnet lens_model[portability]=sonnet
-    preset_agg=opus
-    continue
-  fi
+  case $spec in
+    claude)
+      for l in "${ALL_LENSES[@]}"; do lens_model[$l]=sonnet; done
+      preset_agg=sonnet
+      continue ;;
+    claude-opus)
+      lens_model[correctness]=opus lens_model[security]=opus lens_model[robustness]=opus
+      lens_model[inputs]=sonnet lens_model[docs]=sonnet lens_model[portability]=sonnet
+      preset_agg=opus
+      continue ;;
+  esac
   IFS=, read -ra pairs <<<"$spec"
-  [ ${#pairs[@]} -gt 0 ] || die "-M needs LENS=MODEL pairs or the preset \"claude\""
+  [ ${#pairs[@]} -gt 0 ] || die "-M needs LENS=MODEL pairs or a preset (claude, claude-opus)"
   for pair in "${pairs[@]}"; do
     l=${pair%%=*} m=${pair#*=}
     [[ $pair == *=* && -n $l && -n $m ]] || die "-M \"$pair\": write LENS=MODEL, e.g. -M security=opus, or -M claude"

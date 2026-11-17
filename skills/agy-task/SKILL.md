@@ -122,9 +122,10 @@ ${CLAUDE_PLUGIN_ROOT}/bin/agy-review -r /abs/path/to/repo -b origin/main
 - Pass what the lenses cannot know with `-x FILE`: what the project is, decisions not to report,
   the trap you already suspect. `-l` picks lenses, `-a` adds a command such as a test runner.
 - `-m` sets the model for every task. `-M LENS=MODEL,…` sets it per lens and `-g` for the
-  aggregation; `-M claude` is Opus for correctness, security, robustness and the aggregation and
-  Sonnet for the rest. A review is some 400–500k tokens, which is a large share of the Claude pot's
-  week, so use it only when the user asks for it.
+  aggregation; `-M claude` is Sonnet for every task. A review is some 400–500k tokens, which is a
+  large share of the Claude pot's week, so use it only when the user asks for it. `-M claude-opus`
+  puts Opus on correctness, security, robustness and the aggregation; on Google AI Pro it empties
+  the pot's five-hour limit mid-review, so never pick it unless the user names it.
 - Every model is checked before any lens starts. A pot over its budget or out of quota stops the
   review with exit 2, before anything runs.
 - The diff is limited to 90 kB. For a bigger one, review a narrower range or pick lenses.

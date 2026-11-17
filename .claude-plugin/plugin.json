@@ -1,6 +1,6 @@
 {
   "name": "agy-task",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Offload bounded coding tasks and multi-lens code reviews to the Antigravity CLI (agy), headless in a git worktree, and read the result from git.",
   "author": { "name": "kanylbullen" },
   "repository": "https://github.com/kanylbullen/agy-task",

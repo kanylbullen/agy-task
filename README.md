@@ -270,11 +270,14 @@ docs lens is unreliable on Hydrogen: its worksheet marked claims "agrees" that t
 contradicts, so a docs "no findings" means little. The result is a list of claims to check, not a
 verdict.
 
-Each lens can run on its own model. `-M claude` runs the lenses that need judgement
-(correctness, security, robustness) and the aggregation on Opus and the checklist lenses on Sonnet,
-all on Antigravity's Claude pot, which leaves the Gemini week alone. That pot empties faster: three
-small Sonnet runs, about 30k tokens, took 3 % of its week, and a six-lens review takes some 400–500k.
-`-M security=opus,docs=sonnet` picks per lens, and `-g` picks the aggregation's model.
+Each lens can run on its own model. `-M claude` runs every lens and the aggregation on Sonnet, on
+Antigravity's Claude pot, which leaves the Gemini week alone. That pot empties faster: three small
+Sonnet runs, about 30k tokens, took 3 % of its week, and a six-lens review takes some 400–500k.
+`-M claude-opus` puts Opus on the lenses that need judgement (correctness, security, robustness)
+and the aggregation. On Google AI Pro that is too much: the one such review emptied the pot's
+five-hour limit after about 560k tokens, four tasks failed with their tokens already spent, and the
+week went from 81 % to 28 %. Keep it for a larger plan. `-M security=opus,docs=sonnet` picks per
+lens, and `-g` picks the aggregation's model.
 
 A repository can add its own checklists, like the project-specific lists of a review fleet:
 `.agy-review/context.md` goes to every lens (what the project is, known decisions not to report),
@@ -428,8 +431,9 @@ agy-review -r REPO -b REF [options]
   -x FILE          context for every lens, added to .agy-review/context.md at REF
   -a PREFIX        extra command a lens may run (repeatable), e.g. -a "npm test"
   -m MODEL         model for every task (default: agy-task's, hydrogen)
-  -M LENS=MODEL,…  a model for some lenses (repeatable); -M claude puts opus on
-                   correctness, security, robustness and the aggregation, sonnet on the rest
+  -M LENS=MODEL,…  a model for some lenses (repeatable); -M claude puts sonnet on all,
+                   -M claude-opus puts opus on correctness, security, robustness and the
+                   aggregation (too much for the five-hour limit on Google AI Pro)
   -g MODEL         model for the aggregation (default: -m)
   -n NAME          job name; -t TIME time limit per task (default 20m)
   -A               skip the aggregation and print the lens reports as they are

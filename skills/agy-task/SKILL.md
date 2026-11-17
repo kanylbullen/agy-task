@@ -121,10 +121,17 @@ ${CLAUDE_PLUGIN_ROOT}/bin/agy-review -r /abs/path/to/repo -b origin/main
 - It takes about five minutes; run it in the background.
 - Pass what the lenses cannot know with `-x FILE`: what the project is, decisions not to report,
   the trap you already suspect. `-l` picks lenses, `-a` adds a command such as a test runner.
+- `-m` sets the model for every task. `-M LENS=MODEL,…` sets it per lens and `-g` for the
+  aggregation; `-M claude` is Opus for correctness, security, robustness and the aggregation and
+  Sonnet for the rest. A review is some 400–500k tokens, which is a large share of the Claude pot's
+  week, so use it only when the user asks for it.
+- Every model is checked before any lens starts. A pot over its budget or out of quota stops the
+  review with exit 2, before anything runs.
 - The diff is limited to 90 kB. For a bigger one, review a narrower range or pick lenses.
 - **The output is a list of claims, not a verdict.** Check every finding you report against the
   code. The aggregation already dropped the ones it could not back, and its `DROPPED:` list says
   why. A "no findings" from the docs lens means little: on Hydrogen it marked claims as agreeing
   that the code contradicts.
-- Exit 0: every lens and the aggregation answered. Exit 3: something failed, and the report says
+- Exit 0: every lens and the aggregation answered. Exit 2: bad invocation, or a model would be
+  refused. Exit 3: something failed, and the report says
   which. Each lens's full report and worksheet are in the directory printed at the end.

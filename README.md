@@ -270,6 +270,12 @@ docs lens is unreliable on Hydrogen: its worksheet marked claims "agrees" that t
 contradicts, so a docs "no findings" means little. The result is a list of claims to check, not a
 verdict.
 
+Each lens can run on its own model. `-M claude` runs the lenses that need judgement
+(correctness, security, robustness) and the aggregation on Opus and the checklist lenses on Sonnet,
+all on Antigravity's Claude pot, which leaves the Gemini week alone. That pot empties faster: three
+small Sonnet runs, about 30k tokens, took 3 % of its week, and a six-lens review takes some 400–500k.
+`-M security=opus,docs=sonnet` picks per lens, and `-g` picks the aggregation's model.
+
 A repository can add its own checklists, like the project-specific lists of a review fleet:
 `.agy-review/context.md` goes to every lens (what the project is, known decisions not to report),
 and `.agy-review/<lens>.md` to that lens as "Check in particular". `-x FILE` adds context without
@@ -406,6 +412,7 @@ agy-task [options] -p "<task>"      (or -f FILE, or the task on stdin)
   -P PROJECT       Antigravity project; -L no remote control
   -u DAYS          usage per quota pot over the last DAYS days, and the live quota
   -q               what is left of each Antigravity limit now, and when it refills
+  -E               check the model, its budget and the quota as a run would, and exit
   -B               run although the model's pot is over its weekly budget
 ```
 
@@ -421,14 +428,23 @@ agy-review -r REPO -b REF [options]
   -x FILE          context for every lens, added to .agy-review/context.md at REF
   -a PREFIX        extra command a lens may run (repeatable), e.g. -a "npm test"
   -m MODEL         model for every task (default: agy-task's, hydrogen)
+  -M LENS=MODEL,…  a model for some lenses (repeatable); -M claude puts opus on
+                   correctness, security, robustness and the aggregation, sonnet on the rest
+  -g MODEL         model for the aggregation (default: -m)
   -n NAME          job name; -t TIME time limit per task (default 20m)
   -A               skip the aggregation and print the lens reports as they are
   -V               print the version
 ```
 
+Before any lens starts, agy-review checks every model it will use with `agy-task -E`. A pot over
+its budget, or with an Antigravity limit used up, stops the review before anything runs, and so
+does a budget that the review's estimated tokens would overrun (the estimate comes from earlier
+reviews in the ledger). Each pot's line shows that estimate beside what is left of its lowest limit,
+with a warning at 25 % or less.
+
 agy-review prints the aggregated report and leaves every lens's report, prompt and receipt in
 `~/.cache/agy-task/<NAME>/`. It exits 0 when every lens and the aggregation answered, 2 on a bad
-invocation, and 3 when some task failed; the report says which.
+invocation or a model that would be refused, and 3 when some task failed; the report says which.
 
 **Requirements.** `bash`, git 2.17 or later, `jq`, `flock`, GNU coreutils 8.28 or later (for
 `timeout -k`, and for the `env -C` the agent is told to use), `pgrep` (procps) and `agy`, signed

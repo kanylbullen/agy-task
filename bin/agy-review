@@ -13,9 +13,10 @@
 # README.md: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.6.0
+VERSION=0.7.0
 ALL_LENSES=(correctness security robustness inputs docs portability)
 MAX_DIFF=90000 # agy-task takes at most 120 kB of task, lens text included
+TASK_TOKENS=75000 # tokens per task when the ledger has no earlier review to go by
 
 die() { echo "agy-review: $*" >&2; exit 2; }
 
@@ -48,6 +49,11 @@ claims to check, not a verdict.
   -a PREFIX        extra command a lens may run (repeatable), e.g. -a "npm test".
                    Each lens may always run pwd, ls, wc, grep and git status.
   -m MODEL         model for every task (agy-task's default otherwise: hydrogen)
+  -M LENS=MODEL,…  a model for some lenses, repeatable; the others keep -m.
+                   -M claude: opus on correctness, security, robustness and the
+                   aggregation, sonnet on inputs, docs and portability
+  -g MODEL         model for the aggregation, which checks the findings against
+                   the code (default: -m)
   -n NAME          job name, default review-<timestamp>
   -t TIME          time limit per task, default 20m
   -A               skip the aggregation; print the lens reports as they are
@@ -56,9 +62,14 @@ claims to check, not a verdict.
 Per-repository checklists: .agy-review/<lens>.md at REF is added to that lens
 as "Check in particular", like the project-specific lists of a review fleet.
 
+Before any lens starts, every model is checked as agy-task would (agy-task -E):
+a pot over its budget, or with an Antigravity limit used up, stops the review
+there. Each pot's line shows the review's estimated tokens, from earlier reviews
+in the ledger, beside what is left of its lowest limit.
+
 Output: the aggregated report on stdout; every lens's report, prompt and
 receipt in $AGY_TASK_HOME/<NAME>/ (default ~/.cache/agy-task).
-Exit codes: 0 all lenses and the aggregation answered · 2 bad invocation
+Exit codes: 0 all lenses and the aggregation answered · 2 bad invocation, or a model would be refused
             3 some lens or the aggregation failed (the report says which)
 EOF
 }
@@ -194,9 +205,10 @@ EOF
 }
 
 # --- options ----------------------------------------------------------------------
-repo="" ref="" dbase="" lenses_arg="" ctx_file="" model="" name="" tmo=20m skip_agg=0
-extra=()
-while getopts ":r:b:d:l:x:a:m:n:t:AVh" opt; do
+repo="" ref="" dbase="" lenses_arg="" ctx_file="" model="" agg_model="" name="" tmo=20m skip_agg=0
+extra=() lens_specs=()
+declare -A lens_model=()
+while getopts ":r:b:d:l:x:a:m:M:g:n:t:AVh" opt; do
   case $opt in
     r) repo=$OPTARG ;;
     b) ref=$OPTARG ;;
@@ -205,6 +217,8 @@ while getopts ":r:b:d:l:x:a:m:n:t:AVh" opt; do
     x) ctx_file=$OPTARG ;;
     a) extra+=(-a "$OPTARG") ;; # agy-task checks the prefix itself
     m) model=$OPTARG ;;
+    M) lens_specs+=("$OPTARG") ;;
+    g) agg_model=$OPTARG ;;
     n) name=$OPTARG ;;
     t) tmo=$OPTARG ;;
     A) skip_agg=1 ;;
@@ -232,6 +246,27 @@ fi
 for l in "${lenses[@]}"; do
   lens_text "$l" >/dev/null || die "unknown lens \"$l\"; the lenses are: ${ALL_LENSES[*]}"
 done
+
+# Models per lens: -M LENS=MODEL pairs, or the preset "claude". Later ones win.
+preset_agg=""
+for spec in ${lens_specs[@]+"${lens_specs[@]}"}; do
+  if [ "$spec" = claude ]; then
+    lens_model[correctness]=opus lens_model[security]=opus lens_model[robustness]=opus
+    lens_model[inputs]=sonnet lens_model[docs]=sonnet lens_model[portability]=sonnet
+    preset_agg=opus
+    continue
+  fi
+  IFS=, read -ra pairs <<<"$spec"
+  [ ${#pairs[@]} -gt 0 ] || die "-M needs LENS=MODEL pairs or the preset \"claude\""
+  for pair in "${pairs[@]}"; do
+    l=${pair%%=*} m=${pair#*=}
+    [[ $pair == *=* && -n $l && -n $m ]] || die "-M \"$pair\": write LENS=MODEL, e.g. -M security=opus, or -M claude"
+    lens_text "$l" >/dev/null || die "-M: unknown lens \"$l\"; the lenses are: ${ALL_LENSES[*]}"
+    lens_model[$l]=$m
+  done
+done
+agg_model=${agg_model:-${preset_agg:-$model}}
+model_of() { if [ "$1" = aggregate ]; then echo "$agg_model"; else echo "${lens_model[$1]:-$model}"; fi; }
 
 name=${name:-review-$(date +%m%d-%H%M%S)}
 [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "-n must start with a letter or digit and contain only A-Z a-z 0-9 . _ -"
@@ -271,10 +306,65 @@ if [ -n "$ctx_file" ]; then
 fi
 [ -n "${context//[[:space:]]/}" ] && target_text+=$'\n\n## About this project\n\n'$context
 
+# --- the models, before anything runs ----------------------------------------------
+# Every task checks its own model when it starts, but the lenses start together,
+# and the aggregation only after them: a pot that runs out on the way loses the
+# whole review. So check every model now, and add up what the review will take.
+tasks=("${lenses[@]}")
+[ $skip_agg = 1 ] || tasks+=(aggregate)
+LEDGER=$LOG_ROOT/ledger.tsv
+# Tokens a task of this kind (a lens, or the aggregation) took on average in earlier reviews.
+est_tokens() {
+  local t=""
+  [ -s "$LEDGER" ] && t=$(awk -F'\t' -v s="-$1" 'NR > 1 && $14 != 2 && $13 > 0 && substr($3, length($3) - length(s) + 1) == s { n++; t += $13 }
+    END { if (n) printf "%d", t / n }' "$LEDGER")
+  echo "${t:-$TASK_TOKENS}"
+}
+declare -A checked=() pot_of_model=() pot_tasks=() pot_tokens=() pot_line=()
+for t in "${tasks[@]}"; do
+  m=$(model_of "$t")
+  if [ -z "${checked[x$m]+set}" ]; then
+    if ! line=$("$agy_task" -E ${m:+-m "$m"} 2>"$out/check.err"); then
+      why=$(tail -n 1 "$out/check.err" | sed 's/^agy-task: //')
+      rm -rf -- "$out"
+      die "nothing was started, because a task would be refused: $why"
+    fi
+    checked[x$m]=1
+    IFS=$'\t' read -r id pot budget used qwin qfrac <<<"$line"
+    pot_of_model[x$m]=$pot pot_line[$pot]="$budget $used $qwin $qfrac"
+  fi
+  pot=${pot_of_model[x$m]}
+  pot_tasks[$pot]=$(( ${pot_tasks[$pot]:-0} + 1 ))
+  pot_tokens[$pot]=$(( ${pot_tokens[$pot]:-0} + $(est_tokens "$t") ))
+done
+human() { awk -v x="$1" 'BEGIN { if (x >= 1e6) printf "%.1fM", x / 1e6; else printf "%dk", x / 1000 + 0.5 }'; }
+for pot in "${!pot_tasks[@]}"; do
+  read -r budget used qwin qfrac <<<"${pot_line[$pot]}"
+  need=${pot_tokens[$pot]}
+  note="pot $pot: ${pot_tasks[$pot]} tasks, about $(human "$need") tokens by earlier reviews"
+  if [ "$budget" != - ] && [ $(( used + need )) -gt "$budget" ]; then
+    rm -rf -- "$out"
+    die "$note, and agy-task's budget for it has $(human $(( budget - used ))) of $(human "$budget") left this week, so the aggregation would be refused. Pick other models with -m/-M/-g, fewer lenses with -l, or raise AGY_TASK_BUDGET"
+  fi
+  [ "$budget" != - ] && note+="; budget $(human "$used") of $(human "$budget") used"
+  if [ "$qfrac" != - ]; then
+    left=$(awk -v f="$qfrac" 'BEGIN { printf "%d", f * 100 + 0.5 }')
+    note+="; $left% of its $qwin limit left"
+    if [ "$left" -le 25 ]; then
+      echo "agy-review: warning: $note. A limit that runs out during the review stops the tasks still running; consider -l or other models" >&2
+      continue
+    fi
+  fi
+  echo "agy-review: $note" >&2
+done
+
 # --- the lenses run --------------------------------------------------------------
-margs=()
-[ -n "$model" ] && margs=(-m "$model")
-echo "agy-review: $name · $repo_name at $ref${dbase:+ (diff from $dbase)} · lenses: ${lenses[*]} · $out" >&2
+margs_of() { local m; m=$(model_of "$1"); [ -n "$m" ] && printf '%s\n' -m "$m"; }
+models_text=""
+if [ ${#lens_model[@]} -gt 0 ] || [ "$agg_model" != "$model" ]; then
+  for t in "${tasks[@]}"; do m=$(model_of "$t"); models_text+=" $t=${m:-default}"; done
+fi
+echo "agy-review: $name · $repo_name at $ref${dbase:+ (diff from $dbase)} · lenses: ${lenses[*]}${models_text:+ · models:$models_text} · $out" >&2
 for l in "${lenses[@]}"; do
   {
     lens_text "$l"
@@ -283,6 +373,7 @@ for l in "${lenses[@]}"; do
     common_text
     printf '%s\n' "$diff_block"
   } >"$out/$l.prompt"
+  mapfile -t margs < <(margs_of "$l")
   ("$agy_task" -r "$repo" -b "$ref_sha" -n "$name-$l" -t "$tmo" ${margs[@]+"${margs[@]}"} \
      ${extra[@]+"${extra[@]}"} -f "$out/$l.prompt" >"$out/$l.out" 2>"$out/$l.err"
    echo $? >"$out/$l.rc") &
@@ -317,6 +408,7 @@ if [ $skip_agg = 1 ]; then
   exit $code
 fi
 { aggregate_text; printf '%s\n' "$reports"; } >"$out/aggregate.prompt"
+mapfile -t margs < <(margs_of aggregate)
 if [ "$(wc -c <"$out/aggregate.prompt")" -gt 118000 ]; then
   echo "agy-review: the lens reports are too long to aggregate in one task; printing them as they are" >&2
   echo "== agy-review $name · $summary"

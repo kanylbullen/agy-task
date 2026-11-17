@@ -21,7 +21,7 @@
 # README.md has the full list of traps: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.6.0
+VERSION=0.7.0
 
 # Settings. The environment wins, then an optional config file of KEY=VALUE
 # lines, then the defaults. The file exists so that every caller on the machine
@@ -290,6 +290,9 @@ Model:
                    quota now, and exit
   -q               print Antigravity's quota now (what is left of each limit, and when it
                    refills), and exit
+  -E               check the model (-m), its budget and the live quota as a run would, print
+                   model, pot, budget, used, limit and fraction left as one tab-separated line,
+                   and exit (2 when a run would be refused)
 
 Other:
   -n NAME          short job name [A-Za-z0-9._-], default a timestamp
@@ -321,14 +324,61 @@ Clean up a write task: the receipt prints the command, which is
 EOF
 }
 
+# --- the model, its budget and the live quota ---------------------------------
+# Resolves $model and checks it before anything is created. Sets model, pot,
+# budget_note and quota_note, and the plain values budget, used, qwin and qfrac
+# that -E prints for agy-review.
+preflight() {
+  mkdir -p "$LOG_ROOT" || die "cannot create $LOG_ROOT"
+  budget="" used="" qwin="" qfrac=""
+  # --- the model ------------------------------------------------------------------
+  # agy rejects an unknown id loudly, but only after the worktree has been made.
+  model=$(resolve_model "${model:-$MODEL_DEFAULT}") || exit 2
+  pot=$(pot_of "$model")
+
+  # --- the budget -----------------------------------------------------------------
+  # A scarce pot empties fast: one long write task on Argon took about a fifth of
+  # a Google AI Pro week. A weekly budget keeps such a model for the jobs that need
+  # it. Over budget, the run is refused here, before anything has been created.
+  validate_budget
+  budget=$(budget_for "$pot") budget_note=""
+  if [ -n "$budget" ]; then
+    used=$(pot_used "$pot")
+    budget_note=", $(human "$used") of $(human "$budget") this week"
+    if [ "$used" -ge "$budget" ] && [ $over_budget = 1 ]; then
+      echo "agy-task: warning: the $pot pot is over its weekly budget ($(human "$used") of $(human "$budget") tokens); running anyway because of -B" >&2
+    elif [ "$used" -ge "$budget" ]; then
+      die "the $pot pot is over its weekly budget: agy-task has used $(human "$used") of $(human "$budget") tokens from it in the last 7 days. Pick a model on another pot (the default is $MODEL_DEFAULT), raise AGY_TASK_BUDGET, or pass -B to run this one anyway"
+    fi
+  fi
+
+  # --- the live quota -------------------------------------------------------------
+  # The budget above counts agy-task's own runs; Antigravity counts every client.
+  # A pot with a limit used up fails the run anyway, so say so before anything is
+  # created, and show what is left. The lowest limit of the pot is the one that stops a run.
+  quota=$(live_quota) quota_note=""
+  if [ -n "$quota" ]; then
+    low=$(awk -F'\t' -v p="$pot" '$1 == p' <<<"$quota" | sort -t$'\t' -k3,3g | head -n 1)
+    if [ -n "$low" ]; then
+      IFS=$'\t' read -r _ qwin qfrac qreset <<<"$low"
+      quota_note=", $(pct "$qfrac")% of its $qwin limit left"
+      awk -v f="$qfrac" 'BEGIN { exit !(f <= 0) }' &&
+        die "the $pot pot's $qwin limit is used up in Antigravity; it refills in $(until_text "$qreset"). Pick a model on another pot (the default is $MODEL_DEFAULT)"
+    fi
+  else
+    echo "agy-task: warning: could not read Antigravity's quota (agy -p /usage); running without that check" >&2
+  fi
+}
+
 dir="" repo="" base="" write=0 model="" name="" tmo=30m schema="" conv="" keep=0
-prompt="" prompt_file="" project="" live=1 over_budget=0 sandbox=0 p_given=0
+prompt="" prompt_file="" project="" live=1 over_budget=0 sandbox=0 p_given=0 check_only=0
 allow=("${DEFAULT_ALLOW[@]}")
 
-while getopts ":C:r:b:wSa:m:n:t:s:c:kp:f:P:LBu:qVh" opt; do
+while getopts ":C:r:b:wSa:m:n:t:s:c:kp:f:P:LBu:qEVh" opt; do
   case $opt in
     u) usage_report "$OPTARG"; exit 0 ;;
     q) quota_report; exit 0 ;;
+    E) check_only=1 ;;
     B) over_budget=1 ;;
     V) echo "agy-task $VERSION"; exit 0 ;;
     P) project=$OPTARG ;;
@@ -360,6 +410,17 @@ while getopts ":C:r:b:wSa:m:n:t:s:c:kp:f:P:LBu:qVh" opt; do
 done
 shift $((OPTIND - 1))
 [ $# -eq 0 ] || die "unexpected arguments: $* (the task goes in -p, -f or stdin)"
+
+# -E: check the model, its budget and the live quota as a run would, print them
+# (model, pot, budget, used, limit window, fraction left; "-" where unknown) and
+# exit: 0 when a run could start, 2 when it would be refused. agy-review uses it
+# to check every model of a review before any lens starts.
+if [ $check_only = 1 ]; then
+  command -v jq >/dev/null || die "jq is not on PATH"
+  preflight
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$model" "$pot" "${budget:--}" "${used:--}" "${qwin:--}" "${qfrac:--}"
+  exit 0
+fi
 
 # By whether the flag was given, not by its value: -p "" -f FILE is a conflict too.
 [ $p_given = 1 ] && [ -n "$prompt_file" ] && die "-p and -f both give the task; use one of them"
@@ -420,43 +481,7 @@ for c in agy jq git flock timeout; do
 done
 mkdir -p "$LOG_ROOT" || die "cannot create $LOG_ROOT"
 
-# --- the model ------------------------------------------------------------------
-# agy rejects an unknown id loudly, but only after the worktree has been made.
-model=$(resolve_model "${model:-$MODEL_DEFAULT}") || exit 2
-pot=$(pot_of "$model")
-
-# --- the budget -----------------------------------------------------------------
-# A scarce pot empties fast: one long write task on Argon took about a fifth of
-# a Google AI Pro week. A weekly budget keeps such a model for the jobs that need
-# it. Over budget, the run is refused here, before anything has been created.
-validate_budget
-budget=$(budget_for "$pot") budget_note=""
-if [ -n "$budget" ]; then
-  used=$(pot_used "$pot")
-  budget_note=", $(human "$used") of $(human "$budget") this week"
-  if [ "$used" -ge "$budget" ] && [ $over_budget = 1 ]; then
-    echo "agy-task: warning: the $pot pot is over its weekly budget ($(human "$used") of $(human "$budget") tokens); running anyway because of -B" >&2
-  elif [ "$used" -ge "$budget" ]; then
-    die "the $pot pot is over its weekly budget: agy-task has used $(human "$used") of $(human "$budget") tokens from it in the last 7 days. Pick a model on another pot (the default is $MODEL_DEFAULT), raise AGY_TASK_BUDGET, or pass -B to run this one anyway"
-  fi
-fi
-
-# --- the live quota -------------------------------------------------------------
-# The budget above counts agy-task's own runs; Antigravity counts every client.
-# A pot with a limit used up fails the run anyway, so say so before anything is
-# created, and show what is left. The lowest limit of the pot is the one that stops a run.
-quota=$(live_quota) quota_note=""
-if [ -n "$quota" ]; then
-  low=$(awk -F'\t' -v p="$pot" '$1 == p' <<<"$quota" | sort -t$'\t' -k3,3g | head -n 1)
-  if [ -n "$low" ]; then
-    IFS=$'\t' read -r _ qwin qfrac qreset <<<"$low"
-    quota_note=", $(pct "$qfrac")% of its $qwin limit left"
-    awk -v f="$qfrac" 'BEGIN { exit !(f <= 0) }' &&
-      die "the $pot pot's $qwin limit is used up in Antigravity; it refills in $(until_text "$qreset"). Pick a model on another pot (the default is $MODEL_DEFAULT)"
-  fi
-else
-  echo "agy-task: warning: could not read Antigravity's quota (agy -p /usage); running without that check" >&2
-fi
+preflight
 
 # --- where it runs --------------------------------------------------------------
 run_id="$(date +%Y%m%d-%H%M%S)-$name"

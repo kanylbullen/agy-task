@@ -13,7 +13,7 @@
 # README.md: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.7.1
+VERSION=0.8.0
 ALL_LENSES=(correctness security robustness inputs docs portability)
 MAX_DIFF=90000 # agy-task takes at most 120 kB of task, lens text included
 TASK_TOKENS=75000 # tokens per task when the ledger has no earlier review to go by

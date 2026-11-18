@@ -107,6 +107,14 @@ and a short [skill](skills/agy-task/SKILL.md) that teaches Claude:
 
 The skill is about 130 lines. Read it before you install the plugin.
 
+Two slash commands do the common cases on purpose:
+
+- `/agy-task:review [PR | branch]` runs `agy-review` on a pull request, a branch or the current
+  branch, then checks every finding against the code before reporting it.
+- `/agy-task:run <task>` writes the handover for a task and runs it, then reads the git receipt.
+
+Each is a short Markdown file in [commands/](commands/).
+
 `/plugin marketplace update agy-task` fetches a newer version, and
 `/plugin uninstall agy-task@agy-task` removes it.
 
@@ -272,7 +280,7 @@ verdict.
 
 Each lens can run on its own model. `-M claude` runs every lens and the aggregation on Sonnet, on
 Antigravity's Claude pot, which leaves the Gemini week alone. That pot empties faster: three small
-Sonnet runs, about 30k tokens, took 3 % of its week, and a six-lens review takes some 400–500k.
+Sonnet runs, about 30k tokens, took 3 % of its week, and a six-lens review takes some 450–700k (an all-Sonnet one was 708k and left 12 % of the five-hour limit).
 `-M claude-opus` puts Opus on the lenses that need judgement (correctness, security, robustness)
 and the aggregation. On Google AI Pro that is too much: the one such review emptied the pot's
 five-hour limit after about 560k tokens, four tasks failed with their tokens already spent, and the

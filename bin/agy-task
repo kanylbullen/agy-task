@@ -21,7 +21,7 @@
 # README.md has the full list of traps: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.7.1
+VERSION=0.8.0
 
 # Settings. The environment wins, then an optional config file of KEY=VALUE
 # lines, then the defaults. The file exists so that every caller on the machine

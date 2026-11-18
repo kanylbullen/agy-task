@@ -13,7 +13,7 @@
 # README.md: https://github.com/kanylbullen/agy-task
 set -uo pipefail
 
-VERSION=0.8.0
+VERSION=0.8.1
 ALL_LENSES=(correctness security robustness inputs docs portability)
 MAX_DIFF=90000 # agy-task takes at most 120 kB of task, lens text included
 TASK_TOKENS=75000 # tokens per task when the ledger has no earlier review to go by
@@ -45,7 +45,7 @@ claims to check, not a verdict.
   -l LENSES        comma-separated subset of: correctness, security, robustness,
                    inputs, docs, portability. Default: all six.
   -x FILE          context for every lens: what the project is, known decisions
-                   not to report. Added to .agy-review/context.md at REF, if any.
+                   not to report. Repeatable; added to .agy-review/context.md at REF, if any.
   -a PREFIX        extra command a lens may run (repeatable), e.g. -a "npm test".
                    Each lens may always run pwd, ls, wc, grep and git status.
   -m MODEL         model for every task (agy-task's default otherwise: hydrogen)
@@ -71,8 +71,9 @@ in the ledger, beside what is left of its lowest limit.
 
 Output: the aggregated report on stdout; every lens's report, prompt and
 receipt in $AGY_TASK_HOME/<NAME>/ (default ~/.cache/agy-task).
-Exit codes: 0 all lenses and the aggregation answered · 2 bad invocation, or a model would be refused
-            3 some lens or the aggregation failed (the report says which)
+Exit codes: 0 all lenses and the aggregation answered · 2 bad invocation, or a model would be refused;
+            nothing ran · 3 a lens or the aggregation failed, no lens answered, or the reports were
+            too long to aggregate (the output says which)
 EOF
 }
 
@@ -207,8 +208,8 @@ EOF
 }
 
 # --- options ----------------------------------------------------------------------
-repo="" ref="" dbase="" lenses_arg="" ctx_file="" model="" agg_model="" name="" tmo=20m skip_agg=0
-extra=() lens_specs=()
+repo="" ref="" dbase="" lenses_arg="" model="" agg_model="" name="" tmo=20m skip_agg=0
+extra=() lens_specs=() ctx_files=()
 declare -A lens_model=()
 while getopts ":r:b:d:l:x:a:m:M:g:n:t:AVh" opt; do
   case $opt in
@@ -216,7 +217,7 @@ while getopts ":r:b:d:l:x:a:m:M:g:n:t:AVh" opt; do
     b) ref=$OPTARG ;;
     d) dbase=$OPTARG ;;
     l) lenses_arg=$OPTARG ;;
-    x) ctx_file=$OPTARG ;;
+    x) ctx_files+=("$OPTARG") ;;
     a) extra+=(-a "$OPTARG") ;; # agy-task checks the prefix itself
     m) model=$OPTARG ;;
     M) lens_specs+=("$OPTARG") ;;
@@ -311,10 +312,10 @@ fi
 
 # Project context: committed in the repository, given with -x, or both.
 context=$(git -C "$repo" show "$ref_sha:.agy-review/context.md" 2>/dev/null || true)
-if [ -n "$ctx_file" ]; then
-  extra_ctx=$(cat -- "$ctx_file") || die "cannot read $ctx_file"
+for f in ${ctx_files[@]+"${ctx_files[@]}"}; do
+  extra_ctx=$(cat -- "$f") || die "cannot read $f"
   context=${context:+$context$'\n\n'}$extra_ctx
-fi
+done
 [ -n "${context//[[:space:]]/}" ] && target_text+=$'\n\n## About this project\n\n'$context
 
 # --- the models, before anything runs ----------------------------------------------
@@ -407,7 +408,12 @@ for l in "${lenses[@]}"; do
     failed+=("$l (exit $rc: $(tail -n 1 "$out/$l.err" 2>/dev/null))")
   fi
 done
-[ ${#ok[@]} -gt 0 ] || die "no lens answered: ${failed[*]}"
+if [ ${#ok[@]} = 0 ]; then
+  # Every lens ran and failed: the tasks spent their tokens, so this is a failure (3), not a refusal (2).
+  echo "agy-review: no lens answered: ${failed[*]}" >&2
+  echo "-- reports, prompts and receipts: $out"
+  exit 3
+fi
 summary="lenses answered: ${ok[*]}${failed[*]:+ · failed: ${failed[*]}}"
 
 # --- the aggregation ----------------------------------------------------------------
@@ -416,6 +422,7 @@ code=0
 if [ $skip_agg = 1 ]; then
   echo "== agy-review $name · $summary"
   printf '%s\n' "$reports"
+  echo "-- reports, prompts and receipts: $out"
   exit $code
 fi
 { aggregate_text; printf '%s\n' "$reports"; } >"$out/aggregate.prompt"
@@ -424,6 +431,7 @@ if [ "$(wc -c <"$out/aggregate.prompt")" -gt 118000 ]; then
   echo "agy-review: the lens reports are too long to aggregate in one task; printing them as they are" >&2
   echo "== agy-review $name · $summary"
   printf '%s\n' "$reports"
+  echo "-- reports, prompts and receipts: $out"
   exit 3
 fi
 "$agy_task" -r "$repo" -b "$ref_sha" -n "$name-aggregate" -t "$tmo" ${margs[@]+"${margs[@]}"} \

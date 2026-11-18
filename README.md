@@ -436,7 +436,7 @@ agy-review -r REPO -b REF [options]
   -d BASE          review only the diff BASE...REF, e.g. -d origin/main (at most 90 kB)
   -l LENSES        comma-separated subset of correctness, security, robustness,
                    inputs, docs, portability (default: all six)
-  -x FILE          context for every lens, added to .agy-review/context.md at REF
+  -x FILE          context for every lens (repeatable), added to .agy-review/context.md at REF
   -a PREFIX        extra command a lens may run (repeatable), e.g. -a "npm test"
   -m MODEL         model for every task (default: agy-task's, hydrogen)
   -M LENS=MODEL,…  a model for some lenses (repeatable); -M claude puts sonnet on all,
@@ -456,7 +456,8 @@ with a warning at 25 % or less.
 
 agy-review prints the aggregated report and leaves every lens's report, prompt and receipt in
 `~/.cache/agy-task/<NAME>/`. It exits 0 when every lens and the aggregation answered, 2 on a bad
-invocation or a model that would be refused, and 3 when some task failed; the report says which.
+invocation or a model that would be refused, and 3 when a task failed, no lens answered, or the reports were too long to aggregate; the output
+says which and ends with the directory of every report.
 
 **Requirements.** `bash`, git 2.17 or later, `jq`, `flock`, GNU coreutils 8.28 or later (for
 `timeout -k`, and for the `env -C` the agent is told to use), `pgrep` (procps) and `agy`, signed

@@ -119,7 +119,7 @@ ${CLAUDE_PLUGIN_ROOT}/bin/agy-review -r /abs/path/to/repo -b origin/main
 ```
 
 - It takes about five minutes; run it in the background.
-- Pass what the lenses cannot know with `-x FILE`: what the project is, decisions not to report,
+- Pass what the lenses cannot know with `-x FILE` (repeatable): what the project is, decisions not to report,
   the trap you already suspect. `-l` picks lenses, `-a` adds a command such as a test runner.
 - `-m` sets the model for every task. `-M LENS=MODEL,…` sets it per lens and `-g` for the
   aggregation; `-M claude` is Sonnet for every task. A review is some 450–700k tokens, which is a
@@ -134,5 +134,5 @@ ${CLAUDE_PLUGIN_ROOT}/bin/agy-review -r /abs/path/to/repo -b origin/main
   why. A "no findings" from the docs lens means little: on Hydrogen it marked claims as agreeing
   that the code contradicts.
 - Exit 0: every lens and the aggregation answered. Exit 2: bad invocation, or a model would be
-  refused. Exit 3: something failed, and the report says
+  refused. Exit 3: a task failed, no lens answered, or the reports were too long to aggregate; the output says
   which. Each lens's full report and worksheet are in the directory printed at the end.
